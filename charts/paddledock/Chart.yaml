@@ -1,0 +1,13 @@
+apiVersion: v2
+name: paddledock
+description: Helm chart for PaddleDock (frontend + FastAPI backend + Celery worker)
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+keywords:
+  - mineru
+  - paddleocr
+  - fastapi
+  - nextjs
+maintainers:
+  - name: PaddleDock

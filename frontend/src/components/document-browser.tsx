@@ -1,0 +1,444 @@
+'use client';
+
+import { useEffect, useMemo, useState } from 'react';
+import Link from 'next/link';
+import { Download, LoaderCircle, RefreshCcw, Trash2 } from 'lucide-react';
+
+import { Button } from '@/components/ui/button';
+
+type JobStatus = 'PENDING' | 'RUNNING' | 'FINISHED' | 'FAILED';
+
+type Job = {
+  id: string;
+  original_filename: string;
+  status: JobStatus;
+  tags: string[];
+  error_message?: string | null;
+  processing_info?: {
+    settings?: Record<string, unknown>;
+    execution?: Record<string, unknown>;
+    editor?: Record<string, unknown>;
+  } | null;
+  created_at: string;
+  updated_at?: string;
+};
+
+type DocumentBrowserProps = {
+  title: string;
+  description: string;
+  endpoint: 'jobs' | 'search';
+  allowDelete?: boolean;
+  includeDateFilters?: boolean;
+  compact?: boolean;
+  hideHeader?: boolean;
+};
+
+const API = process.env.NEXT_PUBLIC_API_URL ?? 'http://localhost:8000';
+
+const statusBadge: Record<JobStatus, string> = {
+  PENDING: 'bg-slate-100 text-slate-700',
+  RUNNING: 'bg-emerald-100 text-emerald-800',
+  FINISHED: 'bg-emerald-100 text-emerald-800',
+  FAILED: 'bg-red-600/20 text-red-300',
+};
+
+function pageCountForJob(job: Job): string {
+  const execution = job.processing_info?.execution;
+  const direct = execution?.page_count;
+  if (typeof direct === 'number') {
+    return String(direct);
+  }
+  const structure = execution?.structure;
+  const nested = typeof structure === 'object' && structure !== null ? (structure as Record<string, unknown>).page_count : null;
+  if (typeof nested === 'number') {
+    return String(nested);
+  }
+  return '-';
+}
+
+function jobFolderPath(job: Job): string {
+  const settings = job.processing_info?.settings;
+  const folder = typeof settings?.folder === 'string' ? settings.folder.trim() : '';
+  const subfolder = typeof settings?.subfolder === 'string' ? settings.subfolder.trim() : '';
+  if (folder || subfolder) {
+    return [folder, subfolder].filter(Boolean).join('/');
+  }
+
+  const storageFolder = typeof settings?.storage_folder === 'string' ? settings.storage_folder.trim() : '';
+  if (!storageFolder) {
+    return 'inbox';
+  }
+  const parts = storageFolder.split('/').filter(Boolean);
+  if (parts.length <= 1) {
+    return 'inbox';
+  }
+  return parts.slice(0, -1).join('/');
+}
+
+export function DocumentBrowser({
+  title,
+  description,
+  endpoint,
+  allowDelete = false,
+  includeDateFilters = true,
+  compact = false,
+  hideHeader = false,
+}: DocumentBrowserProps) {
+  const [items, setItems] = useState<Job[]>([]);
+  const [query, setQuery] = useState('');
+  const [tag, setTag] = useState('');
+  const [statusFilter, setStatusFilter] = useState<JobStatus | ''>('');
+  const [fromDate, setFromDate] = useState('');
+  const [toDate, setToDate] = useState('');
+  const [loading, setLoading] = useState(false);
+  const [restartingPending, setRestartingPending] = useState(false);
+  const [selectedFolder, setSelectedFolder] = useState<string>('all');
+  const [deletingFolder, setDeletingFolder] = useState<string | null>(null);
+  const [downloadingFolder, setDownloadingFolder] = useState<string | null>(null);
+  const [protectedJobId, setProtectedJobId] = useState<string | null>(null);
+  const [protectedJobPassword, setProtectedJobPassword] = useState('');
+  const [passwordAttempt, setPasswordAttempt] = useState<string | null>(null);
+
+  const loadItems = async () => {
+    setLoading(true);
+    const params = new URLSearchParams();
+    if (query.trim()) {
+      params.set('q', query.trim());
+    }
+    if (tag.trim()) {
+      params.set('tag', tag.trim());
+    }
+    if (statusFilter) {
+      params.set('status', statusFilter);
+    }
+    if (includeDateFilters && fromDate) {
+      params.set('from_date', fromDate);
+    }
+    if (includeDateFilters && toDate) {
+      params.set('to_date', toDate);
+    }
+
+    const response = await fetch(`${API}/api/v1/${endpoint}${params.toString() ? `?${params.toString()}` : ''}`, {
+      cache: 'no-store',
+    });
+    if (response.ok) {
+      const payload = await response.json();
+      setItems(payload.items ?? []);
+    }
+    setLoading(false);
+  };
+
+  useEffect(() => {
+    void loadItems();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const removeJob = async (id: string, password?: string) => {
+    const url = new URL(`${API}/api/v1/jobs/${id}`);
+    if (password) {
+      url.searchParams.set('password', password);
+    }
+    const response = await fetch(url, { method: 'DELETE' });
+    if (response.status === 401) {
+      setProtectedJobId(id);
+      setProtectedJobPassword('');
+      return;
+    }
+    if (!response.ok) {
+      alert('Failed to delete job');
+      return;
+    }
+    setProtectedJobId(null);
+    await loadItems();
+  };
+
+  const removeFolder = async (folderPath: string) => {
+    setDeletingFolder(folderPath);
+    const url = new URL(`${API}/api/v1/folders/${encodeURI(folderPath)}`);
+    await fetch(url, { method: 'DELETE' });
+    if (selectedFolder === folderPath || selectedFolder.startsWith(`${folderPath}/`)) {
+      setSelectedFolder('all');
+    }
+    await loadItems();
+    setDeletingFolder(null);
+  };
+
+  const downloadFolder = async (folderPath: string) => {
+    setDownloadingFolder(folderPath);
+    try {
+      const response = await fetch(`${API}/api/v1/folders/${encodeURI(folderPath)}/download`);
+      if (!response.ok) {
+        alert('No downloadable markdown files found in this folder.');
+        return;
+      }
+
+      const blob = await response.blob();
+      const href = window.URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = href;
+      link.download = `${folderPath.replaceAll('/', '_')}-markdown.zip`;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      window.URL.revokeObjectURL(href);
+    } finally {
+      setDownloadingFolder(null);
+    }
+  };
+
+  const handlePasswordSubmit = async () => {
+    if (!protectedJobId) return;
+    await removeJob(protectedJobId, protectedJobPassword);
+  };
+
+  const restartPendingJobs = async () => {
+    if (endpoint !== 'jobs') {
+      return;
+    }
+    setRestartingPending(true);
+    try {
+      const response = await fetch(`${API}/api/v1/jobs/restart-pending`, { method: 'POST' });
+      if (!response.ok) {
+        alert('Failed to restart pending jobs.');
+        return;
+      }
+      const payload = await response.json();
+      alert(`Restarted ${payload.queued_jobs ?? 0} pending job(s).`);
+      await loadItems();
+    } finally {
+      setRestartingPending(false);
+    }
+  };
+
+  const folderItems = useMemo(() => {
+    const counts = new Map<string, number>();
+    for (const job of items) {
+      const path = jobFolderPath(job);
+      const parts = path.split('/').filter(Boolean);
+      let current = '';
+      for (const part of parts) {
+        current = current ? `${current}/${part}` : part;
+        counts.set(current, (counts.get(current) ?? 0) + 1);
+      }
+    }
+    return Array.from(counts.entries())
+      .map(([path, count]) => ({ path, count, depth: path.split('/').length - 1, name: path.split('/').pop() ?? path }))
+      .sort((left, right) => left.path.localeCompare(right.path));
+  }, [items]);
+
+  const visibleItems = useMemo(() => {
+    if (selectedFolder === 'all') {
+      return items;
+    }
+    return items.filter((job) => {
+      const folder = jobFolderPath(job);
+      return folder === selectedFolder || folder.startsWith(`${selectedFolder}/`);
+    });
+  }, [items, selectedFolder]);
+
+  return (
+    <div className="w-full text-slate-900">
+
+      <section className="mb-6 rounded-3xl border border-slate-200 bg-white p-5 shadow-[0_20px_60px_rgba(15,23,42,0.05)]">
+        <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
+          <label className="text-sm text-slate-700 xl:col-span-2">
+            Search filename
+            <input
+              value={query}
+              onChange={(event) => setQuery(event.target.value)}
+              className="mt-1 w-full rounded-2xl border border-slate-200 bg-slate-50 px-3 py-2 text-slate-950 outline-none transition placeholder:text-slate-400 focus:border-emerald-300 focus:bg-white"
+              placeholder="invoice, report, contract"
+            />
+          </label>
+          <label className="text-sm text-slate-700">
+            Tag filter
+            <input
+              value={tag}
+              onChange={(event) => setTag(event.target.value)}
+              className="mt-1 w-full rounded-2xl border border-slate-200 bg-slate-50 px-3 py-2 text-slate-950 outline-none transition placeholder:text-slate-400 focus:border-emerald-300 focus:bg-white"
+              placeholder="finance"
+            />
+          </label>
+          <label className="text-sm text-slate-700">
+            Status
+            <select
+              value={statusFilter}
+              onChange={(event) => setStatusFilter(event.target.value as JobStatus | '')}
+              className="mt-1 w-full rounded-2xl border border-slate-200 bg-slate-50 px-3 py-2 text-slate-950 outline-none transition focus:border-emerald-300 focus:bg-white"
+            >
+              <option value="">All</option>
+              <option value="PENDING">PENDING</option>
+              <option value="RUNNING">RUNNING</option>
+              <option value="FINISHED">FINISHED</option>
+              <option value="FAILED">FAILED</option>
+            </select>
+          </label>
+          {includeDateFilters && (
+            <>
+              <label className="text-sm text-slate-700">
+                From date
+                <input
+                  type="date"
+                  value={fromDate}
+                  onChange={(event) => setFromDate(event.target.value)}
+                  className="mt-1 w-full rounded-2xl border border-slate-200 bg-slate-50 px-3 py-2 text-slate-950 outline-none transition focus:border-emerald-300 focus:bg-white"
+                />
+              </label>
+              <label className="text-sm text-slate-700">
+                To date
+                <input
+                  type="date"
+                  value={toDate}
+                  onChange={(event) => setToDate(event.target.value)}
+                  className="mt-1 w-full rounded-2xl border border-slate-200 bg-slate-50 px-3 py-2 text-slate-950 outline-none transition focus:border-emerald-300 focus:bg-white"
+                />
+              </label>
+            </>
+          )}
+        </div>
+        <div className="mt-4 flex flex-wrap gap-2">
+          <Button onClick={loadItems}>Apply Filters</Button>
+          <Button variant="outline" onClick={loadItems}>
+            <RefreshCcw className="mr-2 h-4 w-4" /> Refresh
+          </Button>
+          {endpoint === 'jobs' && (
+            <Button variant="outline" onClick={restartPendingJobs} disabled={restartingPending}>
+              {restartingPending ? 'Restarting...' : 'Restart pending jobs'}
+            </Button>
+          )}
+          <Button
+            variant="outline"
+            onClick={() => {
+              setQuery('');
+              setTag('');
+              setStatusFilter('');
+              setFromDate('');
+              setToDate('');
+              window.setTimeout(() => void loadItems(), 0);
+            }}
+          >
+            Reset
+          </Button>
+        </div>
+      </section>
+
+      <section className="grid gap-4 xl:grid-cols-[280px_minmax(0,1fr)]">
+        <aside className="rounded-3xl border border-slate-200 bg-white p-4 shadow-[0_20px_60px_rgba(15,23,42,0.05)]">
+          <h2 className="text-sm font-semibold uppercase tracking-[0.16em] text-slate-700">Folders</h2>
+          <div className="mt-3 space-y-1">
+            <button
+              type="button"
+              onClick={() => setSelectedFolder('all')}
+              className={`flex w-full items-center justify-between rounded-lg px-2 py-1.5 text-left text-sm ${
+                selectedFolder === 'all' ? 'bg-emerald-50 text-emerald-900' : 'text-slate-700 hover:bg-slate-50'
+              }`}
+            >
+              <span>All folders</span>
+              <span className="text-xs text-slate-500">{items.length}</span>
+            </button>
+            {folderItems.map((folder) => (
+              <div key={folder.path} className="flex items-center gap-1">
+                <button
+                  type="button"
+                  onClick={() => setSelectedFolder(folder.path)}
+                  className={`flex w-full items-center justify-between rounded-lg px-2 py-1.5 text-left text-sm ${
+                    selectedFolder === folder.path ? 'bg-emerald-50 text-emerald-900' : 'text-slate-700 hover:bg-slate-50'
+                  }`}
+                  style={{ paddingLeft: `${8 + folder.depth * 14}px` }}
+                >
+                  <span className="truncate">{folder.name}</span>
+                  <span className="text-xs text-slate-500">{folder.count}</span>
+                </button>
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="ghost"
+                  disabled={downloadingFolder === folder.path}
+                  onClick={() => void downloadFolder(folder.path)}
+                >
+                  <Download className="h-4 w-4 text-emerald-700" />
+                </Button>
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="ghost"
+                  disabled={deletingFolder === folder.path}
+                  onClick={() => void removeFolder(folder.path)}
+                >
+                  <Trash2 className="h-4 w-4 text-red-600" />
+                </Button>
+              </div>
+            ))}
+          </div>
+        </aside>
+
+        <div className="rounded-3xl border border-slate-200 bg-white p-5 shadow-[0_20px_60px_rgba(15,23,42,0.05)]">
+          <div className="mb-3 flex items-center justify-between gap-4">
+            <h2 className="text-lg font-semibold">Results</h2>
+            <p className="text-sm text-slate-500">{visibleItems.length} document(s)</p>
+          </div>
+          <div className="overflow-x-auto">
+          <table className="w-full min-w-[780px] text-left text-sm">
+            <thead className="text-slate-500">
+              <tr>
+                <th className="pb-2">Document</th>
+                <th className="pb-2">Status</th>
+                <th className="pb-2">Pages</th>
+              </tr>
+            </thead>
+            <tbody>
+              {visibleItems.map((job) => (
+                <tr key={job.id} className="border-t border-slate-100">
+                  <td className="py-3">
+                    <Link href={`/jobs/${job.id}`} className="font-medium text-slate-950 hover:text-emerald-700">
+                      {job.original_filename}
+                    </Link>
+                  </td>
+                  <td className="py-3">
+                    <span className={`rounded px-2 py-1 text-xs ${statusBadge[job.status]}`}>{job.status}</span>
+                  </td>
+                  <td className="py-3 text-slate-700">{pageCountForJob(job)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+          {visibleItems.length === 0 && !loading && (
+            <div className="flex items-center gap-2 py-6 text-sm text-slate-600">
+              <LoaderCircle className="h-4 w-4 animate-spin" /> No documents found.
+            </div>
+          )}
+          {loading && (
+            <div className="flex items-center gap-2 py-6 text-sm text-slate-600">
+              <LoaderCircle className="h-4 w-4 animate-spin" /> Loading documents...
+            </div>
+          )}
+        </div>
+        </div>
+      </section>
+
+      {protectedJobId && (
+        <div className="fixed inset-0 flex items-center justify-center bg-slate-950/50 p-4">
+          <div className="rounded-lg border border-slate-200 bg-white p-6 shadow-lg">
+            <h2 className="mb-3 text-lg font-semibold">Password Required</h2>
+            <p className="mb-4 text-sm text-slate-600">This job is password protected.</p>
+            <input
+              type="password"
+              value={protectedJobPassword}
+              onChange={(e) => setProtectedJobPassword(e.target.value)}
+              onKeyDown={(e) => e.key === 'Enter' && void handlePasswordSubmit()}
+              placeholder="Enter password"
+              className="mb-4 w-full rounded border border-slate-200 bg-slate-50 px-3 py-2 text-slate-950"
+              autoFocus
+            />
+            <div className="flex gap-2">
+              <Button onClick={handlePasswordSubmit}>Delete</Button>
+              <Button variant="outline" onClick={() => setProtectedJobId(null)}>
+                Cancel
+              </Button>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}

@@ -1,0 +1,50 @@
+{{- if and .Values.backend.enabled .Values.migrationJob.enabled }}
+{{- if not .Values.database.useExternal }}
+{{- fail "database.useExternal must be true. This chart supports only external PostgreSQL." }}
+{{- end }}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "paddledock.fullname" . }}-migrate
+  labels:
+    {{- include "paddledock.labels" . | nindent 4 }}
+    app.kubernetes.io/component: migration
+  annotations:
+    helm.sh/hook: pre-install,pre-upgrade
+    helm.sh/hook-weight: "-5"
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+spec:
+  backoffLimit: {{ .Values.migrationJob.backoffLimit }}
+  template:
+    metadata:
+      labels:
+        {{- include "paddledock.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: migration
+    spec:
+      restartPolicy: OnFailure
+      serviceAccountName: {{ include "paddledock.serviceAccountName" . }}
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: migrate
+          image: "{{ .Values.backend.image.repository }}:{{ .Values.backend.image.tag }}"
+          imagePullPolicy: {{ .Values.backend.image.pullPolicy }}
+          command: ["sh", "-c", "alembic upgrade head"]
+          env:
+            - name: DATABASE_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ required "database.passwordSecret.name is required" .Values.database.passwordSecret.name }}
+                  key: {{ required "database.passwordSecret.key is required" .Values.database.passwordSecret.key }}
+            - name: DATABASE_URL
+              value: postgresql+psycopg://{{ required "database.user is required" .Values.database.user }}:$(DATABASE_PASSWORD)@{{ required "database.host is required" .Values.database.host }}:{{ .Values.database.port }}/{{ required "database.database is required" .Values.database.database }}
+            - name: DATABASE_SCHEMA
+              value: {{ .Values.database.schema | quote }}
+            - name: REDIS_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "paddledock.fullname" . }}-env
+                  key: REDIS_URL
+{{- end }}

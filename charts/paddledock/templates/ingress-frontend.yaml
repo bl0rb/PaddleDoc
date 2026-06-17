@@ -1,0 +1,36 @@
+{{- if and .Values.frontend.enabled .Values.ingress.frontend.enabled }}
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ include "paddledock.fullname" . }}-frontend
+  labels:
+    {{- include "paddledock.labels" . | nindent 4 }}
+    app.kubernetes.io/component: frontend
+  {{- with .Values.ingress.frontend.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  {{- if .Values.ingress.frontend.className }}
+  ingressClassName: {{ .Values.ingress.frontend.className }}
+  {{- end }}
+  rules:
+    {{- range .Values.ingress.frontend.hosts }}
+    - host: {{ .host | quote }}
+      http:
+        paths:
+          {{- range .paths }}
+          - path: {{ .path }}
+            pathType: {{ .pathType }}
+            backend:
+              service:
+                name: {{ include "paddledock.fullname" $ }}-frontend
+                port:
+                  number: {{ $.Values.frontend.service.port }}
+          {{- end }}
+    {{- end }}
+  {{- if .Values.ingress.frontend.tls }}
+  tls:
+    {{- toYaml .Values.ingress.frontend.tls | nindent 4 }}
+  {{- end }}
+{{- end }}

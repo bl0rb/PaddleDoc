@@ -1,0 +1,7 @@
+# Paddle standalone runtime is configured for CPU execution.
+# This override is intentionally left empty for compatibility with existing scripts.
+
+services:
+  worker:
+    environment:
+      PADDLE_DEFAULT_PROFILE: ppocrv6_tiny

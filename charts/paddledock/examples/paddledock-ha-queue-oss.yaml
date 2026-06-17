@@ -1,0 +1,62 @@
+backend:
+  replicaCount: 3
+  runAlembicOnStartup: false
+
+worker:
+  replicaCount: 5
+  paddleDefaultProfile: ppocrv6_tiny
+
+autoscaling:
+  backend:
+    enabled: true
+    minReplicas: 3
+    maxReplicas: 12
+    targetCPUUtilizationPercentage: 65
+  worker:
+    enabled: true
+    minReplicas: 5
+    maxReplicas: 30
+    targetCPUUtilizationPercentage: 75
+
+migrationJob:
+  enabled: true
+
+database:
+  type: postgresdb
+  useExternal: true
+  host: your-postgres-host.example.com
+  port: 5432
+  database: paddledock
+  schema: public
+  user: paddledock
+  passwordSecret:
+    name: paddledock-db-secret
+    key: password
+
+redis:
+  enabled: false
+  host: your-redis-host.example.com
+  port: 6379
+
+frontend:
+  enabled: true
+  replicaCount: 2
+  apiUrl: https://api.your-domain.example.com
+
+ingress:
+  frontend:
+    enabled: true
+    className: nginx
+    hosts:
+      - host: app.your-domain.example.com
+        paths:
+          - path: /
+            pathType: Prefix
+  backend:
+    enabled: true
+    className: nginx
+    hosts:
+      - host: api.your-domain.example.com
+        paths:
+          - path: /
+            pathType: Prefix

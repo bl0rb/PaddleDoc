@@ -1,0 +1,17 @@
+1. Frontend service:
+{{- if .Values.frontend.enabled }}
+  kubectl get svc {{ include "paddledock.fullname" . }}-frontend -n {{ .Release.Namespace }}
+{{- else }}
+  Frontend is disabled.
+{{- end }}
+
+2. Backend service:
+{{- if .Values.backend.enabled }}
+  kubectl get svc {{ include "paddledock.fullname" . }}-backend -n {{ .Release.Namespace }}
+{{- else }}
+  Backend is disabled.
+{{- end }}
+
+3. If you enabled Helm migration hook, check status:
+  kubectl get jobs -n {{ .Release.Namespace }}
+  kubectl logs job/{{ include "paddledock.fullname" . }}-migrate -n {{ .Release.Namespace }}
