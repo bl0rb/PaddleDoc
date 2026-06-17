@@ -2,6 +2,20 @@
 
 PaddleDock is a document processing web app powered by PaddleOCR. Upload PDFs, Office files, or images and get structured Markdown output — organized in folders, searchable by tag, and optionally password-protected.
 
+## Built for RAG Pipelines
+
+PaddleDock is designed as an ingestion and normalization layer for Retrieval-Augmented Generation (RAG) pipelines. It converts raw PDFs, Office files, and images into structured, searchable Markdown that downstream chunking, embedding, and retrieval systems can consume reliably.
+
+### Why Grade A Documents Matter for RAG
+
+High-quality source documents are critical for reliable RAG outcomes:
+
+- Better retrieval precision through cleaner structure and metadata
+- Better answer accuracy by reducing OCR and layout noise
+- Lower hallucination risk through stronger grounding context
+- Better token efficiency by avoiding irrelevant or duplicated text
+- Higher trust and auditability with consistent, traceable source output
+
 ---
 
 ## User Guide
@@ -97,6 +111,7 @@ The detail page shows full job metadata, OCR execution info, and the generated M
 
 - Upload via drag and drop or file picker
 - Supported formats: PDF, DOCX, PPTX, XLSX, PNG, JPG, JPEG
+- RAG-first output design: structured Markdown optimized for chunking, embedding, and retrieval
 - Job lifecycle: `PENDING` → `RUNNING` → `FINISHED` / `FAILED`
 - Optional password protection per job (bcrypt-hashed, enforces access on view / download / edit / delete)
 - Folder-based storage for uploads and results, browsable as a tree
@@ -232,3 +247,62 @@ npm run dev
 - `backend/alembic/versions/0001_init.py`
 - `backend/alembic/versions/0002_job_processing_info.py`
 - `backend/alembic/versions/0002_job_blob_tags.py`
+
+## Backlog / Roadmap
+
+### 1) RAG Quality Foundation
+
+- [ ] Define measurable success metrics
+  - Targets for OCR quality, retrieval precision/recall, and processing cost per page
+  - Baseline dashboard for current performance before optimization
+  - Weekly trend tracking to catch regressions early
+
+- [ ] Build a document quality gate (Grade A/B/C)
+  - Score documents for OCR confidence, structure quality, and text noise
+  - Label each processed document as Grade A, B, or C
+  - Block or warn on non-Grade-A output before indexing
+
+- [ ] Add a RAG evaluation harness
+  - Curated benchmark dataset (invoices, contracts, scanned and born-digital docs)
+  - Retrieval metrics: precision@k, recall@k, hit@k
+  - Regression checks in CI for extraction and retrieval quality
+
+### 2) Reliability and Operations
+
+- [ ] Improve observability and incident response
+  - Structured logs with request/job correlation IDs across frontend, API, and worker
+  - Metrics for queue depth, processing latency, retries, and failure rate
+  - Alerts for stuck RUNNING jobs and unhealthy worker pools
+
+- [ ] Strengthen security and governance
+  - Strict file validation and content-type enforcement on upload
+  - Optional malware scanning in ingest path
+  - Audit log for view, download, edit, and delete events
+  - Role-based access control for multi-team usage
+
+### 3) Delivery and Developer Workflow
+
+- [ ] Add CI/CD automation and release hardening
+  - Run lint, tests, and container build on every PR
+  - Publish multi-arch images (linux/amd64 and linux/arm64) on tags
+  - Add vulnerability scanning and software bill of materials (SBOM)
+  - Sign release images and enforce immutable version tags
+
+### 4) Product and Ecosystem
+
+- [ ] Improve processing UX and operator feedback
+  - Batch progress and queue position visibility
+  - Per-document quality issue panel with actionable hints
+  - Retry and recovery UX for partial collection failures
+
+- [ ] Add RAG ecosystem integrations
+  - Export pipelines for Qdrant, Weaviate, Pinecone, and pgvector
+  - Webhook events for job finished, failed, and quality-gate outcomes
+  - Optional normalized JSON output alongside Markdown
+
+### 5) Release Milestone
+
+- [ ] Ship v0.2.0 focused on RAG quality and reliability
+  - Include quality gate, evaluation harness, core observability, and CI/CD publishing
+  - Publish release notes with benchmark deltas vs v0.1.0
+  - Define upgrade and migration guidance for existing users
