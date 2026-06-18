@@ -23,7 +23,13 @@ from app.workers.celery_app import celery_app
 logger = logging.getLogger(__name__)
 
 _RECOVERY_LOCK_KEY = 'worker:recovery:startup-lock'
-_STALE_RUNNING_RETRY_AFTER = timedelta(minutes=12)
+_STALE_RUNNING_RETRY_AFTER = timedelta(minutes=2)
+_REDelivery_PROFILE_FALLBACKS = {
+    'ppocrv6_medium_structurev3': 'ppocrv6_tiny_structurev3',
+    'ppocrv6_small_structurev3': 'ppocrv6_tiny_structurev3',
+    'ppocrv6_medium': 'ppocrv6_tiny',
+    'ppocrv6_small': 'ppocrv6_tiny',
+}
 
 
 def _try_acquire_recovery_lock() -> tuple[Redis | None, str | None]:
@@ -112,8 +118,9 @@ def _recover_jobs_on_worker_ready(sender=None, **kwargs) -> None:  # pragma: no 
         _release_recovery_lock(lock_client, lock_token)
 
 
-@celery_app.task(name='process_job', acks_late=True, reject_on_worker_lost=True)
+@celery_app.task(name='process_job', bind=True, acks_late=True, reject_on_worker_lost=True)
 def process_job(
+    self,
     job_id: str,
     profile_id: str | None = None,
     mode: str | None = None,
@@ -159,28 +166,48 @@ def process_job(
         job = db.get(Job, job_id)
         if job is None:
             return
+
+        delivery_info = self.request.delivery_info if isinstance(self.request.delivery_info, dict) else {}
+        is_redelivered = bool(delivery_info.get('redelivered'))
+        effective_profile_id = profile_id
+        fallback_detail: str | None = None
+
+        if is_redelivered and isinstance(profile_id, str):
+            downgraded = _REDelivery_PROFILE_FALLBACKS.get(profile_id)
+            if downgraded and downgraded != profile_id:
+                effective_profile_id = downgraded
+                fallback_detail = (
+                    f'Profile downgraded from {profile_id} to {downgraded} after worker-loss redelivery '
+                    'to reduce memory pressure.'
+                )
+                logger.warning('Downgrading redelivered job %s profile %s -> %s', job_id, profile_id, downgraded)
+
         runtime = get_paddle_settings()
         capability = get_runtime_capability()
         existing_info = job.processing_info if isinstance(job.processing_info, dict) else {}
         existing_settings = existing_info.get('settings') if isinstance(existing_info.get('settings'), dict) else {}
+        execution_payload = {'status': 'running'}
+        if fallback_detail:
+            execution_payload['detail'] = fallback_detail
         job.processing_info = {
             'settings': {
                 **existing_settings,
                 'default_profile': runtime.get('default_profile'),
-                'profile_id': profile_id,
+                'requested_profile_id': profile_id,
+                'profile_id': effective_profile_id,
                 'timeout_seconds': runtime.get('timeout_seconds'),
                 'mode': mode,
                 'email': email,
                 'department': department,
             },
             'runtime': capability,
-            'execution': {'status': 'running'},
+            'execution': execution_payload,
         }
         db.commit()
 
         markdown, details = convert_to_markdown_with_details(
             job.upload_path,
-            profile_id=profile_id,
+            profile_id=effective_profile_id,
             metadata={
                 'mode': mode or 'single',
                 'email': email or '',
