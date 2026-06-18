@@ -558,6 +558,23 @@ def search_documents(
 def restart_pending_jobs(request: Request, db: Session = Depends(get_db)) -> dict[str, int]:
     enforce_rate_limit(request)
 
+    # Also reset stuck RUNNING jobs (worker died after ack, job never completed).
+    stuck_running = db.scalars(select(Job).where(Job.status == JobStatus.RUNNING)).all()
+    for job in stuck_running:
+        existing = job.processing_info if isinstance(job.processing_info, dict) else {}
+        execution = existing.get('execution') if isinstance(existing.get('execution'), dict) else {}
+        job.processing_info = {
+            **existing,
+            'execution': {
+                **execution,
+                'status': 'requeued',
+                'detail': 'Job was stuck in RUNNING state and has been requeued.',
+            },
+        }
+        job.status = JobStatus.PENDING
+    if stuck_running:
+        db.commit()
+
     pending_jobs = db.scalars(select(Job).where(Job.status == JobStatus.PENDING)).all()
     restarted = 0
     for job in pending_jobs:
@@ -575,6 +592,7 @@ def restart_pending_jobs(request: Request, db: Session = Depends(get_db)) -> dic
     return {
         'pending_jobs': len(pending_jobs),
         'queued_jobs': restarted,
+        'recovered_running': len(stuck_running),
     }
 
 

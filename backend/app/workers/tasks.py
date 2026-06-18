@@ -111,7 +111,7 @@ def _recover_jobs_on_worker_ready(sender=None, **kwargs) -> None:  # pragma: no 
         _release_recovery_lock(lock_client, lock_token)
 
 
-@celery_app.task(name='process_job')
+@celery_app.task(name='process_job', acks_late=True, reject_on_worker_lost=True)
 def process_job(
     job_id: str,
     profile_id: str | None = None,
