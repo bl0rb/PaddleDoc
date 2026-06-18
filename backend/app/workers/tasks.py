@@ -122,10 +122,13 @@ def process_job(
     ensure_storage_dirs()
     db = SessionLocal()
     try:
+        # Also claim RUNNING jobs: acks_late retries arrive after the job was
+        # already set to RUNNING by the first attempt, so a PENDING-only check
+        # would silently drop the retry and leave the job stuck forever.
         claimed = db.execute(
             update(Job)
             .where(Job.id == job_id)
-            .where(Job.status == JobStatus.PENDING)
+            .where(Job.status.in_([JobStatus.PENDING, JobStatus.RUNNING]))
             .values(
                 status=JobStatus.RUNNING,
                 error_message=None,
