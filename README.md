@@ -181,7 +181,7 @@ flowchart LR
    B --> C[n8n HTTP Request\nPOST /api/v1/upload]
    C --> D[PaddleDock Queue\nCelery + Worker]
    D --> E[PaddleOCR Processing\nStructured Markdown Output]
-   E --> F[n8n Poll Loop\nGET /api/v1/jobs/{job_id}]
+  E --> F[n8n Poll Loop\nGET /api/v1/jobs/job-id]
    F --> G[n8n Fetch Result\nGET preview or download]
    G --> H[RAG Ingestion\nChunk + Embed + Index]
    H --> I[Retrieval + Answering\nVector Search + LLM]
