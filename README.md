@@ -156,6 +156,37 @@ backend/storage/results/.../edited
 - `PUT /api/v1/paddle/settings`
 - `GET /api/v1/paddle/capabilities`
 
+## n8n Integration
+
+PaddleDock can be used directly from n8n using HTTP Request nodes.
+
+Typical single-file automation flow:
+
+1. **Upload** document to PaddleDock
+  - `POST /api/v1/upload` (multipart form-data)
+  - send `file` plus optional metadata (`profile_id`, `folder`, `subfolder`, `tags`)
+2. **Poll** job status until completion
+  - `GET /api/v1/jobs/{job_id}`
+  - continue until status is `FINISHED` or `FAILED`
+3. **Fetch result** for downstream RAG steps
+  - `GET /api/v1/jobs/{job_id}/preview` (markdown text)
+  - or `GET /api/v1/jobs/{job_id}/download` (file)
+
+If n8n runs in Docker with PaddleDock, use the internal backend URL (for example `http://backend:8000`).
+If n8n runs on your host machine, use `http://localhost:8000`.
+
+```mermaid
+flowchart LR
+   A[Document Source\nPDF DOCX PPTX XLSX PNG JPG] --> B[n8n Trigger\nWebhook / Schedule / Drive Watch]
+   B --> C[n8n HTTP Request\nPOST /api/v1/upload]
+   C --> D[PaddleDock Queue\nCelery + Worker]
+   D --> E[PaddleOCR Processing\nStructured Markdown Output]
+   E --> F[n8n Poll Loop\nGET /api/v1/jobs/{job_id}]
+   F --> G[n8n Fetch Result\nGET preview or download]
+   G --> H[RAG Ingestion\nChunk + Embed + Index]
+   H --> I[Retrieval + Answering\nVector Search + LLM]
+```
+
 ## Run With Docker
 
 ```bash

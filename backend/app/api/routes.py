@@ -56,6 +56,21 @@ UPLOAD_MODE_VALUES = {'single', 'collection'}
 _COLLECTIONS: dict[str, dict] = {}
 
 
+def _count_active_process_jobs() -> int:
+    try:
+        inspect = celery_app.control.inspect(timeout=5.0)
+        active = inspect.active() or {}
+    except Exception:
+        return 0
+
+    return sum(
+        1
+        for tasks in active.values()
+        for task in tasks
+        if isinstance(task, dict) and task.get('name') == 'process_job'
+    )
+
+
 def _parse_tags(raw_tags: str) -> list[str]:
     tags: list[str] = []
     seen: set[str] = set()
@@ -558,8 +573,13 @@ def search_documents(
 def restart_pending_jobs(request: Request, db: Session = Depends(get_db)) -> dict[str, int]:
     enforce_rate_limit(request)
 
-    # Also reset stuck RUNNING jobs (worker died after ack, job never completed).
-    stuck_running = db.scalars(select(Job).where(Job.status == JobStatus.RUNNING)).all()
+    # Keep truly active RUNNING tasks and only requeue excess RUNNING jobs.
+    active_process_jobs = _count_active_process_jobs()
+    running_jobs = db.scalars(
+        select(Job).where(Job.status == JobStatus.RUNNING).order_by(Job.updated_at.desc())
+    ).all()
+    stuck_running = running_jobs[active_process_jobs:]
+
     for job in stuck_running:
         existing = job.processing_info if isinstance(job.processing_info, dict) else {}
         execution = existing.get('execution') if isinstance(existing.get('execution'), dict) else {}
@@ -721,13 +741,20 @@ def healthcheck() -> HealthResponse:
 @router.get('/paddle/status', response_model=PaddleStatusResponse)
 def paddle_status(db: Session = Depends(get_db)) -> PaddleStatusResponse:
     pending_jobs = db.scalar(select(func.count()).select_from(Job).where(Job.status == JobStatus.PENDING)) or 0
-    running_jobs = db.scalar(select(func.count()).select_from(Job).where(Job.status == JobStatus.RUNNING)) or 0
+    db_running_jobs = db.scalar(select(func.count()).select_from(Job).where(Job.status == JobStatus.RUNNING)) or 0
+    active_process_jobs = _count_active_process_jobs()
+    running_jobs = active_process_jobs if active_process_jobs > 0 else int(db_running_jobs)
+
+    # If DB has more RUNNING than actual active tasks, treat the delta as queued.
+    if int(db_running_jobs) > running_jobs:
+        pending_jobs = int(pending_jobs) + (int(db_running_jobs) - running_jobs)
+
     queue_total = int(pending_jobs) + int(running_jobs)
 
     status_name, detail, runtime_dict = get_paddle_status()
     worker_nodes: list[str] = []
     try:
-        inspect = celery_app.control.inspect(timeout=1.0)
+        inspect = celery_app.control.inspect(timeout=5.0)
         ping_payload = inspect.ping() or {}
         worker_nodes = sorted(ping_payload.keys())
     except Exception:
