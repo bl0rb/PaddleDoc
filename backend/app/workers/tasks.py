@@ -1,7 +1,7 @@
 from pathlib import Path
 import logging
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from celery.signals import worker_ready
 from redis import Redis
@@ -23,6 +23,7 @@ from app.workers.celery_app import celery_app
 logger = logging.getLogger(__name__)
 
 _RECOVERY_LOCK_KEY = 'worker:recovery:startup-lock'
+_STALE_RUNNING_RETRY_AFTER = timedelta(minutes=12)
 
 
 def _try_acquire_recovery_lock() -> tuple[Redis | None, str | None]:
@@ -122,19 +123,35 @@ def process_job(
     ensure_storage_dirs()
     db = SessionLocal()
     try:
-        # Also claim RUNNING jobs: acks_late retries arrive after the job was
-        # already set to RUNNING by the first attempt, so a PENDING-only check
-        # would silently drop the retry and leave the job stuck forever.
+        now = datetime.now(timezone.utc)
+        # Normal claim path: only PENDING jobs should become RUNNING.
         claimed = db.execute(
             update(Job)
             .where(Job.id == job_id)
-            .where(Job.status.in_([JobStatus.PENDING, JobStatus.RUNNING]))
+            .where(Job.status == JobStatus.PENDING)
             .values(
                 status=JobStatus.RUNNING,
                 error_message=None,
-                updated_at=datetime.now(timezone.utc),
+                updated_at=now,
             )
         )
+
+        # Recovery path for acks_late redelivery: if a previous worker died,
+        # the job may still be RUNNING in DB. Only reclaim it when stale.
+        if not claimed.rowcount:
+            stale_cutoff = now - _STALE_RUNNING_RETRY_AFTER
+            claimed = db.execute(
+                update(Job)
+                .where(Job.id == job_id)
+                .where(Job.status == JobStatus.RUNNING)
+                .where(Job.updated_at < stale_cutoff)
+                .values(
+                    status=JobStatus.RUNNING,
+                    error_message=None,
+                    updated_at=now,
+                )
+            )
+
         if not claimed.rowcount:
             return
 
