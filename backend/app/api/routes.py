@@ -56,19 +56,26 @@ UPLOAD_MODE_VALUES = {'single', 'collection'}
 _COLLECTIONS: dict[str, dict] = {}
 
 
-def _count_active_process_jobs() -> int:
+def _active_process_job_ids() -> set[str]:
     try:
         inspect = celery_app.control.inspect(timeout=5.0)
         active = inspect.active() or {}
     except Exception:
-        return 0
+        return set()
 
-    return sum(
-        1
-        for tasks in active.values()
-        for task in tasks
-        if isinstance(task, dict) and task.get('name') == 'process_job'
-    )
+    job_ids: set[str] = set()
+    for tasks in active.values():
+        for task in tasks:
+            if not isinstance(task, dict) or task.get('name') != 'process_job':
+                continue
+            args = task.get('args')
+            if isinstance(args, (list, tuple)) and args and isinstance(args[0], str):
+                job_ids.add(args[0])
+    return job_ids
+
+
+def _count_active_process_jobs() -> int:
+    return len(_active_process_job_ids())
 
 
 def _parse_tags(raw_tags: str) -> list[str]:
@@ -553,7 +560,17 @@ def list_jobs(
     status_filter: JobStatus | None = Query(default=None, alias='status'),
 ) -> JobListResponse:
     jobs = _job_query(db, q=q, tag=tag, from_date=from_date, to_date=to_date, status_filter=status_filter)
-    return JobListResponse(items=[_job_to_response(job) for job in jobs])
+    items = [_job_to_response(job) for job in jobs]
+
+    # UI normalization: if workers report active process_job IDs, treat any
+    # non-active RUNNING entries as queued/pending to avoid stale RUNNING noise.
+    active_job_ids = _active_process_job_ids()
+    if active_job_ids:
+        for item in items:
+            if item.status == JobStatus.RUNNING and item.id not in active_job_ids:
+                item.status = JobStatus.PENDING
+
+    return JobListResponse(items=items)
 
 
 @router.get('/search', response_model=JobSearchResponse)
@@ -566,7 +583,15 @@ def search_documents(
     status_filter: JobStatus | None = Query(default=None, alias='status'),
 ) -> JobSearchResponse:
     jobs = _job_query(db, q=q, tag=tag, from_date=from_date, to_date=to_date, status_filter=status_filter)
-    return JobSearchResponse(items=[_job_to_response(job) for job in jobs], total=len(jobs))
+    items = [_job_to_response(job) for job in jobs]
+
+    active_job_ids = _active_process_job_ids()
+    if active_job_ids:
+        for item in items:
+            if item.status == JobStatus.RUNNING and item.id not in active_job_ids:
+                item.status = JobStatus.PENDING
+
+    return JobSearchResponse(items=items, total=len(items))
 
 
 @router.post('/jobs/restart-pending')
