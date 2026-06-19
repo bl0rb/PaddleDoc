@@ -27,7 +27,7 @@ def test_convert_to_markdown_with_paddle_backend(monkeypatch, tmp_path):
     monkeypatch.setattr(
         paddle_service,
         '_paddleocr_to_structure',
-        lambda _source, _profile: (
+        lambda _source, _profile_id, _profile, _capability: (
             [
                 {
                     'page_index': 0,
@@ -49,12 +49,15 @@ def test_convert_to_markdown_with_paddle_backend(monkeypatch, tmp_path):
                     ],
                 }
             ],
-            [
-                {
-                    'json': {'res': {'dt_scores': [0.99, 0.97], 'rec_score': 0.98}},
-                    'markdown': {'markdown': 'sample'},
-                }
-            ],
+            {
+                'raw_outputs': [
+                    {
+                        'json': {'res': {'dt_scores': [0.99, 0.97], 'rec_score': 0.98}},
+                        'markdown': {'markdown': 'sample'},
+                    }
+                ],
+                'pdf_chunking': None,
+            },
         ),
     )
 
@@ -110,7 +113,7 @@ def test_non_pdf_uses_paddle_profile(monkeypatch, tmp_path):
     monkeypatch.setattr(
         paddle_service,
         '_paddleocr_to_structure',
-        lambda _source, _profile: (
+        lambda _source, _profile_id, _profile, _capability: (
             [
                 {
                     'page_index': 0,
@@ -125,12 +128,15 @@ def test_non_pdf_uses_paddle_profile(monkeypatch, tmp_path):
                     ],
                 }
             ],
-            [
-                {
-                    'json': {'res': {'confidence': 0.99}},
-                    'markdown': {'markdown': 'docx parsed'},
-                }
-            ],
+            {
+                'raw_outputs': [
+                    {
+                        'json': {'res': {'confidence': 0.99}},
+                        'markdown': {'markdown': 'docx parsed'},
+                    }
+                ],
+                'pdf_chunking': None,
+            },
         ),
     )
 

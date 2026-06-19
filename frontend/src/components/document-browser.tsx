@@ -186,13 +186,19 @@ export function DocumentBrowser({
   };
 
   useEffect(() => {
-    void loadItems();
+    const run = async () => {
+      const response = await fetch(`${API}/api/v1/${endpoint}`, {
+        cache: 'no-store',
+      });
+      if (!response.ok) {
+        return;
+      }
+      const payload = await response.json();
+      setItems(payload.items ?? []);
+    };
+    void run();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
-
-  useEffect(() => {
-    setCurrentPage(1);
-  }, [query, tag, statusFilter, fromDate, toDate, selectedFolder, items.length]);
 
   const removeJob = async (id: string, password?: string) => {
     const url = new URL(`${API}/api/v1/jobs/${id}`);
@@ -417,10 +423,11 @@ export function DocumentBrowser({
   }, [visibleItems, sortDirection, sortKey]);
 
   const totalPages = Math.max(1, Math.ceil(sortedItems.length / pageSize));
+  const displayPage = Math.min(currentPage, totalPages);
   const paginatedItems = useMemo(() => {
-    const start = (currentPage - 1) * pageSize;
+    const start = (displayPage - 1) * pageSize;
     return sortedItems.slice(start, start + pageSize);
-  }, [currentPage, pageSize, sortedItems]);
+  }, [displayPage, pageSize, sortedItems]);
 
   const setSort = (nextKey: SortKey) => {
     setCurrentPage(1);
@@ -448,7 +455,10 @@ export function DocumentBrowser({
             Search filename
             <input
               value={query}
-              onChange={(event) => setQuery(event.target.value)}
+              onChange={(event) => {
+                setQuery(event.target.value);
+                setCurrentPage(1);
+              }}
               className="mt-1 w-full rounded-2xl border border-slate-200 bg-slate-50 px-3 py-2 text-slate-950 outline-none transition placeholder:text-slate-400 focus:border-emerald-300 focus:bg-white"
               placeholder="invoice, report, contract"
             />
@@ -457,7 +467,10 @@ export function DocumentBrowser({
             Tag filter
             <input
               value={tag}
-              onChange={(event) => setTag(event.target.value)}
+              onChange={(event) => {
+                setTag(event.target.value);
+                setCurrentPage(1);
+              }}
               className="mt-1 w-full rounded-2xl border border-slate-200 bg-slate-50 px-3 py-2 text-slate-950 outline-none transition placeholder:text-slate-400 focus:border-emerald-300 focus:bg-white"
               placeholder="finance"
             />
@@ -466,7 +479,10 @@ export function DocumentBrowser({
             Status
             <select
               value={statusFilter}
-              onChange={(event) => setStatusFilter(event.target.value as JobStatus | '')}
+              onChange={(event) => {
+                setStatusFilter(event.target.value as JobStatus | '');
+                setCurrentPage(1);
+              }}
               className="mt-1 w-full rounded-2xl border border-slate-200 bg-slate-50 px-3 py-2 text-slate-950 outline-none transition focus:border-emerald-300 focus:bg-white"
             >
               <option value="">All</option>
@@ -483,7 +499,10 @@ export function DocumentBrowser({
                 <input
                   type="date"
                   value={fromDate}
-                  onChange={(event) => setFromDate(event.target.value)}
+                  onChange={(event) => {
+                    setFromDate(event.target.value);
+                    setCurrentPage(1);
+                  }}
                   className="mt-1 w-full rounded-2xl border border-slate-200 bg-slate-50 px-3 py-2 text-slate-950 outline-none transition focus:border-emerald-300 focus:bg-white"
                 />
               </label>
@@ -492,7 +511,10 @@ export function DocumentBrowser({
                 <input
                   type="date"
                   value={toDate}
-                  onChange={(event) => setToDate(event.target.value)}
+                  onChange={(event) => {
+                    setToDate(event.target.value);
+                    setCurrentPage(1);
+                  }}
                   className="mt-1 w-full rounded-2xl border border-slate-200 bg-slate-50 px-3 py-2 text-slate-950 outline-none transition focus:border-emerald-300 focus:bg-white"
                 />
               </label>
@@ -531,7 +553,10 @@ export function DocumentBrowser({
           <div className="mt-3 space-y-1">
             <button
               type="button"
-              onClick={() => setSelectedFolder('all')}
+              onClick={() => {
+                setSelectedFolder('all');
+                setCurrentPage(1);
+              }}
               className={`flex w-full items-center justify-between rounded-lg px-2 py-1.5 text-left text-sm ${
                 selectedFolder === 'all' ? 'bg-emerald-50 text-emerald-900' : 'text-slate-700 hover:bg-slate-50'
               }`}
@@ -543,7 +568,10 @@ export function DocumentBrowser({
               <div key={folder.path} className="flex flex-wrap items-center gap-1 sm:flex-nowrap">
                 <button
                   type="button"
-                  onClick={() => setSelectedFolder(folder.path)}
+                  onClick={() => {
+                    setSelectedFolder(folder.path);
+                    setCurrentPage(1);
+                  }}
                   className={`min-w-0 flex-1 rounded-lg px-2 py-1.5 text-left text-sm ${
                     selectedFolder === folder.path ? 'bg-emerald-50 text-emerald-900' : 'text-slate-700 hover:bg-slate-50'
                   }`}
@@ -593,7 +621,7 @@ export function DocumentBrowser({
           <div className="mb-3 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between sm:gap-4">
             <h2 className="text-lg font-semibold">Results</h2>
             <p className="text-sm text-slate-500">
-              {sortedItems.length} document(s) · Page {currentPage} / {totalPages}
+              {sortedItems.length} document(s) · Page {displayPage} / {totalPages}
             </p>
           </div>
           <div className="overflow-x-auto">
@@ -695,13 +723,13 @@ export function DocumentBrowser({
           {sortedItems.length > pageSize && (
             <div className="mt-4 flex items-center justify-between gap-3 text-sm text-slate-600">
               <p>
-                Showing {(currentPage - 1) * pageSize + 1}-{Math.min(currentPage * pageSize, sortedItems.length)} of {sortedItems.length}
+                Showing {(displayPage - 1) * pageSize + 1}-{Math.min(displayPage * pageSize, sortedItems.length)} of {sortedItems.length}
               </p>
               <div className="flex gap-2">
-                <Button variant="outline" size="sm" disabled={currentPage === 1} onClick={() => setCurrentPage((page) => page - 1)}>
+                <Button variant="outline" size="sm" disabled={displayPage === 1} onClick={() => setCurrentPage((page) => page - 1)}>
                   Previous
                 </Button>
-                <Button variant="outline" size="sm" disabled={currentPage === totalPages} onClick={() => setCurrentPage((page) => page + 1)}>
+                <Button variant="outline" size="sm" disabled={displayPage === totalPages} onClick={() => setCurrentPage((page) => page + 1)}>
                   Next
                 </Button>
               </div>
