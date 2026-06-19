@@ -6,6 +6,13 @@ import { useParams } from 'next/navigation';
 
 import { Button } from '@/components/ui/button';
 
+const LOWER_PROFILE_RETRY_MAP: Record<string, string> = {
+  ppocrv6_medium_structurev3: 'ppocrv6_small_structurev3',
+  ppocrv6_small_structurev3: 'ppocrv6_tiny_structurev3',
+  ppocrv6_medium: 'ppocrv6_tiny',
+  ppocrv6_small: 'ppocrv6_tiny',
+};
+
 type Job = {
   id: string;
   original_filename: string;
@@ -31,6 +38,7 @@ export default function JobDetails() {
   const [requirePassword, setRequirePassword] = useState(false);
   const [password, setPassword] = useState('');
   const [loadError, setLoadError] = useState<string | null>(null);
+  const [isRetryingLower, setIsRetryingLower] = useState(false);
 
   useEffect(() => {
     const run = async () => {
@@ -122,6 +130,34 @@ export default function JobDetails() {
   const structure = execution?.structure as Record<string, unknown> | undefined;
   const blockCount = typeof structure?.block_count === 'number' ? structure.block_count : null;
   const pageCount = typeof structure?.page_count === 'number' ? structure.page_count : null;
+  const warning = typeof execution?.warning === 'string' ? execution.warning : null;
+  const suggestedLowerProfile =
+    (typeof execution?.suggested_profile_id === 'string' ? execution.suggested_profile_id : null) ||
+    (typeof settings?.profile_id === 'string' ? LOWER_PROFILE_RETRY_MAP[settings.profile_id] ?? null : null);
+
+  const retryWithLowerProfile = async () => {
+    if (!job?.id) {
+      return;
+    }
+    setIsRetryingLower(true);
+    setLoadError(null);
+    try {
+      const response = await fetch(`${API}/api/v1/jobs/${job.id}/retry-lower-profile`, { method: 'POST' });
+      if (!response.ok) {
+        const payload = await response.json().catch(() => ({}));
+        const detail = typeof payload?.detail === 'string' ? payload.detail : 'Failed to retry with lower profile.';
+        setLoadError(detail);
+        return;
+      }
+      const refreshed = await fetch(`${API}/api/v1/jobs/${job.id}`, { cache: 'no-store' });
+      if (refreshed.ok) {
+        const jobData = await refreshed.json();
+        setJob(jobData);
+      }
+    } finally {
+      setIsRetryingLower(false);
+    }
+  };
 
   const saveMarkdown = async () => {
     setIsSaving(true);
@@ -159,6 +195,20 @@ export default function JobDetails() {
         {selectedProfileLabel && <p>Profile name: {selectedProfileLabel}</p>}
         {converter && <p>Converter: {converter}</p>}
         {pageCount !== null && blockCount !== null && <p>Structure: {pageCount} pages, {blockCount} blocks</p>}
+        {job.status === 'FAILED' && (
+          <div className="rounded-md border border-amber-300 bg-amber-50 p-3 text-amber-900">
+            <p className="text-sm">
+              {warning || 'Processing stopped for this document. Retry manually with a lower profile.'}
+            </p>
+            {suggestedLowerProfile && (
+              <div className="mt-2">
+                <Button size="sm" variant="outline" disabled={isRetryingLower} onClick={retryWithLowerProfile}>
+                  {isRetryingLower ? 'Retrying...' : `Retry with ${suggestedLowerProfile}`}
+                </Button>
+              </div>
+            )}
+          </div>
+        )}
         <section>
           <h2 className="mb-2 text-lg font-semibold">Processing Info</h2>
           <pre className="overflow-x-auto rounded-md border border-slate-200 bg-white p-4 text-sm text-emerald-800">

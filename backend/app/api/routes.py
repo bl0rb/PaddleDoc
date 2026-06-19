@@ -54,6 +54,12 @@ router = APIRouter(prefix='/api/v1')
 
 UPLOAD_MODE_VALUES = {'single', 'collection'}
 _COLLECTIONS: dict[str, dict] = {}
+_LOWER_PROFILE_RETRY_MAP = {
+    'ppocrv6_medium_structurev3': 'ppocrv6_small_structurev3',
+    'ppocrv6_small_structurev3': 'ppocrv6_tiny_structurev3',
+    'ppocrv6_medium': 'ppocrv6_tiny',
+    'ppocrv6_small': 'ppocrv6_tiny',
+}
 
 
 def _active_process_job_ids() -> set[str]:
@@ -280,6 +286,37 @@ def _delete_job_artifacts(job: Job) -> None:
                 version_path,
                 settings.results_dir.resolve(),
             )
+
+
+def _delete_job_outputs(job: Job) -> None:
+    """Delete generated outputs while keeping original uploads for reprocessing."""
+    if job.result_path:
+        result_file = Path(job.result_path).resolve()
+        result_file.unlink(missing_ok=True)
+        _cleanup_empty_parents(result_file, settings.results_dir.resolve())
+
+    info = job.processing_info if isinstance(job.processing_info, dict) else {}
+    editor = info.get('editor') if isinstance(info.get('editor'), dict) else {}
+
+    latest_path = editor.get('latest_result_path') if isinstance(editor.get('latest_result_path'), str) else None
+    if latest_path:
+        latest_file = Path(latest_path).resolve()
+        latest_file.unlink(missing_ok=True)
+        _cleanup_empty_parents(latest_file, settings.results_dir.resolve())
+
+    versions = editor.get('versions') if isinstance(editor.get('versions'), list) else []
+    for version in versions:
+        if isinstance(version, dict) and isinstance(version.get('path'), str):
+            version_file = Path(version['path']).resolve()
+            version_file.unlink(missing_ok=True)
+            _cleanup_empty_parents(version_file, settings.results_dir.resolve())
+
+    # Clear output-related fields in DB, keep settings/tags/upload for reprocessing.
+    next_info = {**info} if isinstance(info, dict) else {}
+    if isinstance(next_info.get('editor'), dict):
+        next_info.pop('editor', None)
+    job.processing_info = next_info
+    job.result_markdown = None
 
 
 def _attach_tags(db: Session, job: Job, tags: list[str]) -> None:
@@ -639,6 +676,165 @@ def restart_pending_jobs(request: Request, db: Session = Depends(get_db)) -> dic
         'queued_jobs': restarted,
         'recovered_running': len(stuck_running),
     }
+
+
+@router.post('/jobs/{job_id}/restart')
+def restart_job(job_id: str, request: Request, db: Session = Depends(get_db)) -> dict[str, str]:
+    enforce_rate_limit(request)
+
+    job = db.get(Job, job_id)
+    if job is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail='Job not found')
+
+    # Allow requeue for stale RUNNING records, but block truly active jobs.
+    active_job_ids = _active_process_job_ids()
+    if job.status == JobStatus.RUNNING and job.id in active_job_ids:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail='Job is currently running')
+
+    info = job.processing_info if isinstance(job.processing_info, dict) else {}
+    settings_info = info.get('settings') if isinstance(info.get('settings'), dict) else {}
+
+    profile_id = settings_info.get('profile_id') if isinstance(settings_info.get('profile_id'), str) else None
+    mode = settings_info.get('mode') if isinstance(settings_info.get('mode'), str) else None
+    email = settings_info.get('email') if isinstance(settings_info.get('email'), str) else None
+    department = settings_info.get('department') if isinstance(settings_info.get('department'), str) else None
+
+    _delete_job_outputs(job)
+    info = job.processing_info if isinstance(job.processing_info, dict) else {}
+    execution = info.get('execution') if isinstance(info.get('execution'), dict) else {}
+    job.processing_info = {
+        **info,
+        'execution': {
+            **execution,
+            'status': 'requeued',
+            'detail': 'Job was manually restarted from the jobs list.',
+        },
+    }
+    job.status = JobStatus.PENDING
+    job.error_message = None
+    db.commit()
+
+    process_job.delay(job.id, profile_id, mode, email, department)
+
+    return {
+        'job_id': job.id,
+        'status': 'queued',
+    }
+
+
+@router.post('/jobs/{job_id}/retry-lower-profile')
+def retry_job_with_lower_profile(job_id: str, request: Request, db: Session = Depends(get_db)) -> dict[str, str]:
+    enforce_rate_limit(request)
+
+    job = db.get(Job, job_id)
+    if job is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail='Job not found')
+
+    active_job_ids = _active_process_job_ids()
+    if job.status == JobStatus.RUNNING and job.id in active_job_ids:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail='Job is currently running')
+
+    info = job.processing_info if isinstance(job.processing_info, dict) else {}
+    settings_info = info.get('settings') if isinstance(info.get('settings'), dict) else {}
+
+    current_profile = (
+        settings_info.get('profile_id') if isinstance(settings_info.get('profile_id'), str) else None
+    ) or (
+        settings_info.get('requested_profile_id') if isinstance(settings_info.get('requested_profile_id'), str) else None
+    )
+    if not current_profile:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail='Job has no profile configured')
+
+    lower_profile = _LOWER_PROFILE_RETRY_MAP.get(current_profile)
+    if not lower_profile:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f'No lower profile available for {current_profile}',
+        )
+
+    mode = settings_info.get('mode') if isinstance(settings_info.get('mode'), str) else None
+    email = settings_info.get('email') if isinstance(settings_info.get('email'), str) else None
+    department = settings_info.get('department') if isinstance(settings_info.get('department'), str) else None
+
+    _delete_job_outputs(job)
+
+    info = job.processing_info if isinstance(job.processing_info, dict) else {}
+    settings = info.get('settings') if isinstance(info.get('settings'), dict) else {}
+    execution = info.get('execution') if isinstance(info.get('execution'), dict) else {}
+
+    job.processing_info = {
+        **info,
+        'settings': {
+            **settings,
+            'previous_profile_id': current_profile,
+            'requested_profile_id': lower_profile,
+            'profile_id': lower_profile,
+        },
+        'execution': {
+            **execution,
+            'status': 'requeued',
+            'detail': f'Job retried manually with lower profile {lower_profile} (previous: {current_profile}).',
+        },
+    }
+    job.status = JobStatus.PENDING
+    job.error_message = None
+    db.commit()
+
+    process_job.delay(job.id, lower_profile, mode, email, department)
+    return {
+        'job_id': job.id,
+        'status': 'queued',
+        'profile_id': lower_profile,
+    }
+
+
+@router.post('/folders/{folder_path:path}/restart')
+def restart_folder(folder_path: str, request: Request, db: Session = Depends(get_db)) -> dict[str, int | str]:
+    enforce_rate_limit(request)
+
+    normalized = _sanitize_storage_path(folder_path)
+    if not normalized:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail='Folder path required')
+
+    active_job_ids = _active_process_job_ids()
+    jobs = db.scalars(select(Job)).all()
+    folder_jobs = [
+        job
+        for job in jobs
+        if (fp := _job_folder_path(job)) == normalized or fp.startswith(f'{normalized}/')
+    ]
+
+    restarted = 0
+    for job in folder_jobs:
+        if job.status == JobStatus.RUNNING and job.id in active_job_ids:
+            continue
+
+        info = job.processing_info if isinstance(job.processing_info, dict) else {}
+        settings_info = info.get('settings') if isinstance(info.get('settings'), dict) else {}
+        profile_id = settings_info.get('profile_id') if isinstance(settings_info.get('profile_id'), str) else None
+        mode = settings_info.get('mode') if isinstance(settings_info.get('mode'), str) else None
+        email = settings_info.get('email') if isinstance(settings_info.get('email'), str) else None
+        department = settings_info.get('department') if isinstance(settings_info.get('department'), str) else None
+
+        _delete_job_outputs(job)
+
+        info = job.processing_info if isinstance(job.processing_info, dict) else {}
+        execution = info.get('execution') if isinstance(info.get('execution'), dict) else {}
+        job.processing_info = {
+            **info,
+            'execution': {
+                **execution,
+                'status': 'requeued',
+                'detail': 'Job was manually restarted from the folder action.',
+            },
+        }
+        job.status = JobStatus.PENDING
+        job.error_message = None
+        process_job.delay(job.id, profile_id, mode, email, department)
+        restarted += 1
+
+    db.commit()
+    return {'path': normalized, 'restarted_jobs': restarted}
 
 
 @router.get('/stats', response_model=DashboardStatsResponse)

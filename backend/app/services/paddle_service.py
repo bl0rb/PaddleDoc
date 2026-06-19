@@ -3,16 +3,26 @@ import importlib.util
 import platform
 import re
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from typing import cast
 
 from celery.exceptions import TimeoutError as CeleryTimeoutError
-from pypdf import PdfReader
+from pypdf import PdfReader, PdfWriter
 from redis import Redis
 
 from app.core.config import settings
 
 _RUNTIME_SETTINGS_KEY = 'paddle:runtime_settings'
 _DEFAULT_PROFILE_ID = 'ppocrv6_tiny'
+_PDF_CHUNK_PAGE_SIZE = 6
+_PDF_CHUNK_PAGE_SIZE_BY_PROFILE: dict[str, int] = {
+    'ppocrv6_medium_structurev3': 2,
+    'ppocrv6_medium': 2,
+    'ppocrv6_small_structurev3': 4,
+    'ppocrv6_small': 4,
+    'ppocrv6_tiny_structurev3': 6,
+    'ppocrv6_tiny': 8,
+}
 
 _PADDLE_PROFILES: dict[str, dict[str, str]] = {
     'ppocrv6_tiny': {
@@ -130,6 +140,52 @@ def _fallback_pdf_to_markdown(source: Path) -> str:
     if not sections:
         raise RuntimeError('PDF fallback extraction produced no text')
     return '\n\n'.join(sections)
+
+
+def _pdf_page_count(source: Path) -> int:
+    reader = PdfReader(str(source))
+    return len(reader.pages)
+
+
+def _to_markdown_table(headers: list[str], rows: list[list[str]]) -> str:
+    if not headers:
+        return ''
+    header_line = '| ' + ' | '.join(headers) + ' |'
+    divider_line = '| ' + ' | '.join(['---'] * len(headers)) + ' |'
+    body_lines = ['| ' + ' | '.join(row) + ' |' for row in rows]
+    return '\n'.join([header_line, divider_line, *body_lines])
+
+
+def _fallback_spreadsheet_to_markdown(source: Path) -> tuple[str, int, int]:
+    import pandas as pd  # noqa: PLC0415
+
+    suffix = source.suffix.lower()
+    engine = 'xlrd' if suffix == '.xls' else None
+    sheets = pd.read_excel(source, sheet_name=None, dtype=str, engine=engine)
+
+    sections: list[str] = []
+    sheet_count = 0
+    row_count = 0
+
+    for sheet_name, frame in sheets.items():
+        if frame is None:
+            continue
+        frame = frame.fillna('')
+        headers = [str(col).strip() or f'col_{index + 1}' for index, col in enumerate(frame.columns.tolist())]
+        rows = [[str(value).replace('\n', ' ').strip() for value in record] for record in frame.values.tolist()]
+
+        if not headers and not rows:
+            continue
+
+        table_md = _to_markdown_table(headers, rows)
+        sections.append(f'## Sheet: {sheet_name}\n\n{table_md}'.strip())
+        sheet_count += 1
+        row_count += len(rows)
+
+    if not sections:
+        raise RuntimeError('Spreadsheet fallback extraction produced no rows')
+
+    return '\n\n---\n\n'.join(sections), sheet_count, row_count
 
 
 def _clean_block_text(value: str) -> str:
@@ -273,7 +329,46 @@ def _convert_structure_to_markdown(
     }
 
 
-def _paddleocr_to_structure(source: Path, profile: dict[str, str]) -> tuple[list[dict], dict]:
+def _adaptive_pdf_chunk_page_size(
+    source: Path,
+    profile_id: str,
+    total_pages: int,
+    capability: dict,
+) -> tuple[int, dict[str, int | str | bool]]:
+    default_chunk = _PDF_CHUNK_PAGE_SIZE_BY_PROFILE.get(profile_id, _PDF_CHUNK_PAGE_SIZE)
+    file_size_mb = source.stat().st_size / (1024 * 1024)
+    cpu_only = bool(capability.get('selected_device') == 'cpu')
+
+    # Keep quality profile, but reduce chunk size for risky large PDFs on CPU to lower peak memory.
+    adaptive_chunk = default_chunk
+    if cpu_only and profile_id.startswith('ppocrv6_medium'):
+        if total_pages >= 20 or file_size_mb >= 30:
+            adaptive_chunk = 1
+        elif total_pages >= 12 or file_size_mb >= 18:
+            adaptive_chunk = min(adaptive_chunk, 2)
+    elif cpu_only and profile_id.startswith('ppocrv6_small'):
+        if total_pages >= 40 or file_size_mb >= 45:
+            adaptive_chunk = min(adaptive_chunk, 2)
+        elif total_pages >= 24 or file_size_mb >= 28:
+            adaptive_chunk = min(adaptive_chunk, 3)
+
+    adaptive_chunk = max(1, adaptive_chunk)
+    return adaptive_chunk, {
+        'enabled': adaptive_chunk != default_chunk,
+        'chunk_page_size': adaptive_chunk,
+        'default_chunk_page_size': default_chunk,
+        'total_pages': total_pages,
+        'file_size_mb': int(file_size_mb),
+        'cpu_only': cpu_only,
+    }
+
+
+def _paddleocr_to_structure(
+    source: Path,
+    profile_id: str,
+    profile: dict[str, str],
+    capability: dict,
+) -> tuple[list[dict], dict]:
     from paddleocr import PPStructureV3  # noqa: PLC0415
 
     use_table_recognition = profile.get('use_table_recognition', 'false').lower() == 'true'
@@ -291,26 +386,60 @@ def _paddleocr_to_structure(source: Path, profile: dict[str, str]) -> tuple[list
         engine='onnxruntime',
         device='cpu',
     )
-    results = list(pipeline.predict(str(source)))
-    if not results:
-        raise RuntimeError('PaddleOCR PP-StructureV3 produced no results')
-
     page_structures: list[dict] = []
-    page_markdown: list[dict] = []
-    for result in results:
-        result_json = cast(dict, result.json)
-        result_markdown = cast(dict, result.markdown)
-        res_payload = cast(dict | None, result_json.get('res'))
-        if not res_payload:
-            continue
-        page_structures.append(res_payload)
-        page_markdown.append(result_markdown)
+
+    def _collect_results(pred_results: list) -> None:
+        for result in pred_results:
+            result_json = cast(dict, result.json)
+            res_payload = cast(dict | None, result_json.get('res'))
+            if not res_payload:
+                continue
+            page_structures.append(res_payload)
+
+    chunking_meta: dict[str, int | str | bool] = {'enabled': False, 'chunk_page_size': _PDF_CHUNK_PAGE_SIZE}
+
+    if source.suffix.lower() == '.pdf':
+        reader = PdfReader(str(source))
+        total_pages = len(reader.pages)
+        if total_pages == 0:
+            raise RuntimeError('PDF has no pages to process')
+
+        chunk_page_size, chunking_meta = _adaptive_pdf_chunk_page_size(
+            source=source,
+            profile_id=profile_id,
+            total_pages=total_pages,
+            capability=capability,
+        )
+
+        with TemporaryDirectory(prefix='paddledock_pdf_chunks_') as tmpdir:
+            tmpdir_path = Path(tmpdir)
+            for chunk_start in range(0, total_pages, chunk_page_size):
+                chunk_end = min(chunk_start + chunk_page_size, total_pages)
+                writer = PdfWriter()
+                for page_index in range(chunk_start, chunk_end):
+                    writer.add_page(reader.pages[page_index])
+
+                chunk_path = tmpdir_path / f'chunk_{chunk_start + 1}_{chunk_end}.pdf'
+                with chunk_path.open('wb') as handle:
+                    writer.write(handle)
+
+                chunk_results = list(pipeline.predict(str(chunk_path)))
+                if not chunk_results:
+                    raise RuntimeError(
+                        f'PaddleOCR PP-StructureV3 produced no results for PDF chunk {chunk_start + 1}-{chunk_end}'
+                    )
+                _collect_results(chunk_results)
+    else:
+        results = list(pipeline.predict(str(source)))
+        if not results:
+            raise RuntimeError('PaddleOCR PP-StructureV3 produced no results')
+        _collect_results(results)
 
     if not page_structures:
         raise RuntimeError('PaddleOCR PP-StructureV3 returned no structured pages')
 
     return page_structures, {
-        'page_markdown': page_markdown,
+        'pdf_chunking': chunking_meta,
     }
 
 
@@ -405,18 +534,38 @@ def convert_to_markdown_with_details(
 
     if not _paddleocr_available():
         if source.suffix.lower() == '.pdf':
+            page_count = _pdf_page_count(source)
             return _fallback_pdf_to_markdown(source), {
                 'engine': 'pypdf-fallback',
                 'used_fallback': True,
                 'fallback_reason': 'PaddleOCR is not installed in this worker image',
                 'profile_id': selected_profile_id,
                 'profile_label': selected_profile['label'],
+                'page_count': page_count,
+                **capability,
+            }
+        if source.suffix.lower() in {'.xls', '.xlsx'}:
+            markdown, sheet_count, row_count = _fallback_spreadsheet_to_markdown(source)
+            return markdown, {
+                'engine': 'spreadsheet-fallback',
+                'used_fallback': True,
+                'fallback_reason': 'PaddleOCR is not installed in this worker image',
+                'profile_id': selected_profile_id,
+                'profile_label': selected_profile['label'],
+                'page_count': max(1, sheet_count),
+                'sheet_count': sheet_count,
+                'row_count': row_count,
                 **capability,
             }
         raise RuntimeError('PaddleOCR is not installed in this worker image')
 
     try:
-        page_structures, raw_outputs = _paddleocr_to_structure(source, selected_profile)
+        page_structures, raw_outputs = _paddleocr_to_structure(
+            source,
+            selected_profile_id,
+            selected_profile,
+            capability,
+        )
         markdown, block_stats = _convert_structure_to_markdown(
             page_structures,
             source_name=source.name,
@@ -428,23 +577,40 @@ def convert_to_markdown_with_details(
             'used_fallback': False,
             'profile_id': selected_profile_id,
             'profile_label': selected_profile['label'],
+            'page_count': block_stats['page_count'],
             'profile': selected_profile,
             'structure': {
                 'page_count': block_stats['page_count'],
                 'block_count': block_stats['block_count'],
                 'block_labels': block_stats['block_labels'],
             },
+            'pdf_chunking': raw_outputs.get('pdf_chunking'),
             'converter': 'ppstructure-json-to-rag-markdown',
             **capability,
         }
     except Exception as exc:
         if source.suffix.lower() == '.pdf':
+            page_count = _pdf_page_count(source)
             return _fallback_pdf_to_markdown(source), {
                 'engine': 'pypdf-fallback',
                 'used_fallback': True,
                 'fallback_reason': str(exc),
                 'profile_id': selected_profile_id,
                 'profile_label': selected_profile['label'],
+                'page_count': page_count,
+                **capability,
+            }
+        if source.suffix.lower() in {'.xls', '.xlsx'}:
+            markdown, sheet_count, row_count = _fallback_spreadsheet_to_markdown(source)
+            return markdown, {
+                'engine': 'spreadsheet-fallback',
+                'used_fallback': True,
+                'fallback_reason': str(exc),
+                'profile_id': selected_profile_id,
+                'profile_label': selected_profile['label'],
+                'page_count': max(1, sheet_count),
+                'sheet_count': sheet_count,
+                'row_count': row_count,
                 **capability,
             }
         raise

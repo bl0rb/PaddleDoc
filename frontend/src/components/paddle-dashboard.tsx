@@ -311,7 +311,9 @@ export function PaddleDashboard({ view = 'home' }: PaddleDashboardProps) {
     formData.append('mode', 'single');
     const response = await fetch(`${API}/api/v1/upload`, { method: 'POST', body: formData });
     if (!response.ok) {
-      setFlowMessage('Single upload failed. Please verify the file type.');
+      const payload = await response.json().catch(() => ({}));
+      const detail = typeof payload?.detail === 'string' ? payload.detail : 'Single upload failed. Please verify the file type.';
+      setFlowMessage(detail);
       setBusy(false);
       return;
     }
@@ -363,7 +365,9 @@ export function PaddleDashboard({ view = 'home' }: PaddleDashboardProps) {
           body: formData,
         });
         if (!response.ok) {
-          setFlowMessage(`Failed to upload ${file.name}`);
+          const payload = await response.json().catch(() => ({}));
+          const detail = typeof payload?.detail === 'string' ? payload.detail : 'upload failed';
+          setFlowMessage(`Failed to upload ${file.name}: ${detail}`);
           continue;
         }
         uploadedNames.push(file.name);
@@ -896,7 +900,7 @@ export function PaddleDashboard({ view = 'home' }: PaddleDashboardProps) {
                       type="file"
                       multiple
                       className="hidden"
-                      accept=".pdf,.docx,.pptx,.xlsx,.png,.jpg,.jpeg"
+                      accept=".pdf,.docx,.pptx,.xlsx,.xls,.png,.jpg,.jpeg"
                       onChange={async (event) => {
                         const files = event.currentTarget.files;
                         if (files) {
@@ -950,7 +954,7 @@ export function PaddleDashboard({ view = 'home' }: PaddleDashboardProps) {
                 >
                   <UploadCloud className="mx-auto mb-4 h-10 w-10 text-slate-600" />
                   <p className="mb-2 text-lg font-medium">Drag and drop file here</p>
-                  <p className="mb-4 text-sm text-slate-600">PDF, DOCX, PPTX, XLSX, PNG, JPG, JPEG (max. 100 MB)</p>
+                  <p className="mb-4 text-sm text-slate-600">PDF, DOCX, PPTX, XLSX, XLS, PNG, JPG, JPEG (max. 100 MB)</p>
                   <p className="mb-4 text-xs text-slate-500">
                     Target folder: {folder.trim() || 'single'}{subfolder.trim() ? ` / ${subfolder.trim()}` : ''}
                   </p>
@@ -958,7 +962,7 @@ export function PaddleDashboard({ view = 'home' }: PaddleDashboardProps) {
                     ref={singleFileInputRef}
                     type="file"
                     className="hidden"
-                    accept=".pdf,.docx,.pptx,.xlsx,.png,.jpg,.jpeg"
+                    accept=".pdf,.docx,.pptx,.xlsx,.xls,.png,.jpg,.jpeg"
                     onChange={async (event) => {
                       const file = event.currentTarget.files?.[0];
                       if (file) {

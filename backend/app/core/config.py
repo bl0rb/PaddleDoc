@@ -16,6 +16,7 @@ class Settings(BaseSettings):
     results_dir: Path = Path('backend/storage/results')
     paddle_default_profile: str = 'ppocrv6_tiny'
     paddle_timeout_seconds: int = 300
+    worker_concurrency: int = 1
 
 
 settings = Settings()
