@@ -6,15 +6,29 @@ from fastapi import HTTPException, UploadFile, status
 
 from app.core.config import settings
 
-ALLOWED_EXTENSIONS = {'.pdf', '.docx', '.pptx', '.xlsx', '.png', '.jpg', '.jpeg'}
+ALLOWED_EXTENSIONS = {'.pdf', '.docx', '.pptx', '.xlsx', '.xls', '.png', '.jpg', '.jpeg'}
 ALLOWED_MIME_TYPES = {
     'application/pdf',
     'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
     'application/vnd.openxmlformats-officedocument.presentationml.presentation',
     'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    'application/vnd.ms-excel',
     'image/png',
     'image/jpeg',
 }
+
+_EXTENSION_TO_MIME_TYPES: dict[str, set[str]] = {
+    '.pdf': {'application/pdf'},
+    '.docx': {'application/vnd.openxmlformats-officedocument.wordprocessingml.document'},
+    '.pptx': {'application/vnd.openxmlformats-officedocument.presentationml.presentation'},
+    '.xlsx': {'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'},
+    '.xls': {'application/vnd.ms-excel'},
+    '.png': {'image/png'},
+    '.jpg': {'image/jpeg'},
+    '.jpeg': {'image/jpeg'},
+}
+
+_GENERIC_MIME_TYPES = {'', 'application/octet-stream', 'binary/octet-stream'}
 
 
 def ensure_storage_dirs() -> None:
@@ -34,9 +48,27 @@ def _safe_suffix(filename: str) -> str:
     return suffix
 
 
-def _validate_mime(file: UploadFile) -> None:
+def _validate_mime(file: UploadFile, suffix: str) -> None:
     content_type = (file.content_type or '').lower()
     guessed, _ = mimetypes.guess_type(file.filename or '')
+    guessed = (guessed or '').lower()
+    expected_for_suffix = _EXTENSION_TO_MIME_TYPES.get(suffix, set())
+
+    if content_type in ALLOWED_MIME_TYPES or guessed in ALLOWED_MIME_TYPES:
+        return
+
+    # Some clients (curl, browser drag/drop, sync clients) send generic MIME types.
+    # If extension is explicitly supported, accept generic MIME to avoid false negatives.
+    if content_type in _GENERIC_MIME_TYPES and suffix in ALLOWED_EXTENSIONS:
+        return
+
+    # If MIME is specific but not globally listed, still allow when it matches extension expectations.
+    if expected_for_suffix and (content_type in expected_for_suffix or guessed in expected_for_suffix):
+        return
+
+    if suffix in ALLOWED_EXTENSIONS and guessed in _GENERIC_MIME_TYPES and content_type in _GENERIC_MIME_TYPES:
+        return
+
     if content_type not in ALLOWED_MIME_TYPES and guessed not in ALLOWED_MIME_TYPES:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail='Unsupported MIME type')
 
@@ -44,7 +76,7 @@ def _validate_mime(file: UploadFile) -> None:
 def save_upload(file: UploadFile, storage_folder: str, file_id: str) -> tuple[str, str, bytes, int]:
     ensure_storage_dirs()
     suffix = _safe_suffix(file.filename or '')
-    _validate_mime(file)
+    _validate_mime(file, suffix)
 
     folder_path = ensure_folder((settings.uploads_dir / storage_folder).resolve())
     target_path = folder_path / f'{file_id}{suffix}'
