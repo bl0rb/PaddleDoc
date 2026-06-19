@@ -11,6 +11,7 @@ from pypdf import PdfReader, PdfWriter
 from redis import Redis
 
 from app.core.config import settings
+from app.services.quality_gate import evaluate_document_quality
 
 _RUNTIME_SETTINGS_KEY = 'paddle:runtime_settings'
 _DEFAULT_PROFILE_ID = 'ppocrv6_tiny'
@@ -387,14 +388,20 @@ def _paddleocr_to_structure(
         device='cpu',
     )
     page_structures: list[dict] = []
+    raw_outputs: list[dict] = []
 
     def _collect_results(pred_results: list) -> None:
         for result in pred_results:
             result_json = cast(dict, result.json)
+            result_markdown = cast(dict, result.markdown)
             res_payload = cast(dict | None, result_json.get('res'))
             if not res_payload:
                 continue
             page_structures.append(res_payload)
+            raw_outputs.append({
+                'json': result_json,
+                'markdown': result_markdown,
+            })
 
     chunking_meta: dict[str, int | str | bool] = {'enabled': False, 'chunk_page_size': _PDF_CHUNK_PAGE_SIZE}
 
@@ -439,6 +446,7 @@ def _paddleocr_to_structure(
         raise RuntimeError('PaddleOCR PP-StructureV3 returned no structured pages')
 
     return page_structures, {
+        'raw_outputs': raw_outputs,
         'pdf_chunking': chunking_meta,
     }
 
@@ -534,18 +542,22 @@ def convert_to_markdown_with_details(
 
     if not _paddleocr_available():
         if source.suffix.lower() == '.pdf':
+            markdown = _fallback_pdf_to_markdown(source)
             page_count = _pdf_page_count(source)
-            return _fallback_pdf_to_markdown(source), {
+            quality_gate = evaluate_document_quality(markdown)
+            return markdown, {
                 'engine': 'pypdf-fallback',
                 'used_fallback': True,
                 'fallback_reason': 'PaddleOCR is not installed in this worker image',
                 'profile_id': selected_profile_id,
                 'profile_label': selected_profile['label'],
                 'page_count': page_count,
+                'quality_gate': quality_gate,
                 **capability,
             }
         if source.suffix.lower() in {'.xls', '.xlsx'}:
             markdown, sheet_count, row_count = _fallback_spreadsheet_to_markdown(source)
+            quality_gate = evaluate_document_quality(markdown)
             return markdown, {
                 'engine': 'spreadsheet-fallback',
                 'used_fallback': True,
@@ -555,12 +567,13 @@ def convert_to_markdown_with_details(
                 'page_count': max(1, sheet_count),
                 'sheet_count': sheet_count,
                 'row_count': row_count,
+                'quality_gate': quality_gate,
                 **capability,
             }
         raise RuntimeError('PaddleOCR is not installed in this worker image')
 
     try:
-        page_structures, raw_outputs = _paddleocr_to_structure(
+        page_structures, extraction_meta = _paddleocr_to_structure(
             source,
             selected_profile_id,
             selected_profile,
@@ -571,6 +584,12 @@ def convert_to_markdown_with_details(
             source_name=source.name,
             profile_label=selected_profile['label'],
             metadata=metadata,
+        )
+        quality_gate = evaluate_document_quality(
+            markdown,
+            page_structures=page_structures,
+            raw_outputs=cast(list[dict], extraction_meta.get('raw_outputs', [])),
+            block_stats=block_stats,
         )
         return markdown, {
             'engine': 'paddleocr',
@@ -584,24 +603,29 @@ def convert_to_markdown_with_details(
                 'block_count': block_stats['block_count'],
                 'block_labels': block_stats['block_labels'],
             },
-            'pdf_chunking': raw_outputs.get('pdf_chunking'),
+            'pdf_chunking': extraction_meta.get('pdf_chunking'),
+            'quality_gate': quality_gate,
             'converter': 'ppstructure-json-to-rag-markdown',
             **capability,
         }
     except Exception as exc:
         if source.suffix.lower() == '.pdf':
+            markdown = _fallback_pdf_to_markdown(source)
             page_count = _pdf_page_count(source)
-            return _fallback_pdf_to_markdown(source), {
+            quality_gate = evaluate_document_quality(markdown)
+            return markdown, {
                 'engine': 'pypdf-fallback',
                 'used_fallback': True,
                 'fallback_reason': str(exc),
                 'profile_id': selected_profile_id,
                 'profile_label': selected_profile['label'],
                 'page_count': page_count,
+                'quality_gate': quality_gate,
                 **capability,
             }
         if source.suffix.lower() in {'.xls', '.xlsx'}:
             markdown, sheet_count, row_count = _fallback_spreadsheet_to_markdown(source)
+            quality_gate = evaluate_document_quality(markdown)
             return markdown, {
                 'engine': 'spreadsheet-fallback',
                 'used_fallback': True,
@@ -611,6 +635,7 @@ def convert_to_markdown_with_details(
                 'page_count': max(1, sheet_count),
                 'sheet_count': sheet_count,
                 'row_count': row_count,
+                'quality_gate': quality_gate,
                 **capability,
             }
         raise

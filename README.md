@@ -288,10 +288,10 @@ npm run dev
   - Baseline dashboard for current performance before optimization
   - Weekly trend tracking to catch regressions early
 
-- [ ] Build a document quality gate (Grade A/B/C)
-  - Score documents for OCR confidence, structure quality, and text noise
-  - Label each processed document as Grade A, B, or C
-  - Block or warn on non-Grade-A output before indexing
+- [x] Build a document quality gate (Grade A/B/C)
+  - Score documents from OCR confidence, structure quality, and text-noise heuristics
+  - Include page- and table-level signals where available, not just whole-page edit distance
+  - Label each processed document as Grade A, B, or C and warn or block non-Grade-A output before indexing
 
 - [ ] Add a RAG evaluation harness
   - Curated benchmark dataset (invoices, contracts, scanned and born-digital docs)
