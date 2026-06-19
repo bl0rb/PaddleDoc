@@ -158,6 +158,10 @@ export default function JobDetails() {
       setIsRetryingLower(false);
     }
   };
+  const qualityGate = execution?.quality_gate as Record<string, unknown> | undefined;
+  const qualityGrade = typeof qualityGate?.grade === 'string' ? qualityGate.grade : null;
+  const qualityScore = typeof qualityGate?.score === 'number' ? qualityGate.score : null;
+  const qualityRecommendation = typeof qualityGate?.recommendation === 'string' ? qualityGate.recommendation : null;
 
   const saveMarkdown = async () => {
     setIsSaving(true);
@@ -208,6 +212,13 @@ export default function JobDetails() {
               </div>
             )}
           </div>
+        )}
+        {qualityGrade && (
+          <p>
+            Quality gate: {qualityGrade}
+            {qualityScore !== null ? ` (${qualityScore.toFixed(3)})` : ''}
+            {qualityRecommendation ? ` - ${qualityRecommendation}` : ''}
+          </p>
         )}
         <section>
           <h2 className="mb-2 text-lg font-semibold">Processing Info</h2>

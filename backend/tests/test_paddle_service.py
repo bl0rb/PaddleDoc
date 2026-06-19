@@ -3,6 +3,7 @@ from pathlib import Path
 import pytest
 
 from app.services import paddle_service
+from app.services.quality_gate import evaluate_document_quality
 
 
 def test_runtime_capability_cpu_selected(monkeypatch):
@@ -26,7 +27,7 @@ def test_convert_to_markdown_with_paddle_backend(monkeypatch, tmp_path):
     monkeypatch.setattr(
         paddle_service,
         '_paddleocr_to_structure',
-        lambda _source, _profile: (
+        lambda _source, _profile_id, _profile, _capability: (
             [
                 {
                     'page_index': 0,
@@ -48,7 +49,15 @@ def test_convert_to_markdown_with_paddle_backend(monkeypatch, tmp_path):
                     ],
                 }
             ],
-            {'page_markdown': []},
+            {
+                'raw_outputs': [
+                    {
+                        'json': {'res': {'dt_scores': [0.99, 0.97], 'rec_score': 0.98}},
+                        'markdown': {'markdown': 'sample'},
+                    }
+                ],
+                'pdf_chunking': None,
+            },
         ),
     )
 
@@ -59,6 +68,8 @@ def test_convert_to_markdown_with_paddle_backend(monkeypatch, tmp_path):
     assert details['used_fallback'] is False
     assert details['profile_id'] == 'ppocrv6_tiny'
     assert details['converter'] == 'ppstructure-json-to-rag-markdown'
+    assert details['quality_gate']['grade'] in {'A', 'B', 'C'}
+    assert details['quality_gate']['recommendation'] in {'allow', 'warn', 'block'}
 
 
 def test_convert_to_markdown_falls_back_to_pypdf_when_paddle_missing(monkeypatch, tmp_path):
@@ -87,6 +98,7 @@ def test_convert_to_markdown_falls_back_to_pypdf_when_paddle_missing(monkeypatch
     assert 'Hello from PDF' in markdown
     assert details['engine'] == 'pypdf-fallback'
     assert details['used_fallback'] is True
+    assert details['quality_gate']['grade'] in {'A', 'B', 'C'}
 
 
 def test_non_pdf_uses_paddle_profile(monkeypatch, tmp_path):
@@ -101,7 +113,7 @@ def test_non_pdf_uses_paddle_profile(monkeypatch, tmp_path):
     monkeypatch.setattr(
         paddle_service,
         '_paddleocr_to_structure',
-        lambda _source, _profile: (
+        lambda _source, _profile_id, _profile, _capability: (
             [
                 {
                     'page_index': 0,
@@ -116,13 +128,22 @@ def test_non_pdf_uses_paddle_profile(monkeypatch, tmp_path):
                     ],
                 }
             ],
-            {'page_markdown': []},
+            {
+                'raw_outputs': [
+                    {
+                        'json': {'res': {'confidence': 0.99}},
+                        'markdown': {'markdown': 'docx parsed'},
+                    }
+                ],
+                'pdf_chunking': None,
+            },
         ),
     )
 
     markdown, details = paddle_service.convert_to_markdown_with_details(str(source), profile_id='ppocrv6_tiny')
     assert 'docx parsed' in markdown
     assert details['engine'] == 'paddleocr'
+    assert details['quality_gate']['grade'] in {'A', 'B', 'C'}
 
 
 def test_get_paddle_capabilities_exposes_profiles():
@@ -172,3 +193,30 @@ def test_convert_structure_to_markdown_renders_rag_blocks():
     assert '| 1 | 2 |' in markdown
     assert '---' in markdown  # separator present
     assert stats['block_count'] == 2
+
+
+def test_evaluate_document_quality_prefers_clean_high_confidence_documents():
+    quality = evaluate_document_quality(
+        '# Title\n\nClean document with table content.',
+        page_structures=[
+            {
+                'parsing_res_list': [
+                    {'block_label': 'paragraph_title', 'block_content': 'Title', 'block_order': 1},
+                    {'block_label': 'table', 'block_content': '| A | B |', 'block_order': 2},
+                ]
+            }
+        ],
+        raw_outputs=[{'json': {'res': {'dt_scores': [0.98, 0.97], 'rec_score': 0.99}}}],
+        block_stats={'page_count': 1, 'block_count': 2, 'block_labels': {'paragraph_title': 1, 'table': 1}},
+    )
+
+    assert quality['grade'] == 'A'
+    assert quality['recommendation'] == 'allow'
+    assert quality['score'] >= 0.9
+
+
+def test_evaluate_document_quality_penalizes_noise():
+    quality = evaluate_document_quality('@@@ @@ @@@\n@@@ @@ @@@\n@@@ @@ @@@')
+
+    assert quality['grade'] == 'C'
+    assert quality['recommendation'] == 'block'
