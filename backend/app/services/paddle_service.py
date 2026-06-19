@@ -10,6 +10,7 @@ from pypdf import PdfReader
 from redis import Redis
 
 from app.core.config import settings
+from app.services.quality_gate import evaluate_document_quality
 
 _RUNTIME_SETTINGS_KEY = 'paddle:runtime_settings'
 _DEFAULT_PROFILE_ID = 'ppocrv6_tiny'
@@ -273,7 +274,7 @@ def _convert_structure_to_markdown(
     }
 
 
-def _paddleocr_to_structure(source: Path, profile: dict[str, str]) -> tuple[list[dict], dict]:
+def _paddleocr_to_structure(source: Path, profile: dict[str, str]) -> tuple[list[dict], list[dict]]:
     from paddleocr import PPStructureV3  # noqa: PLC0415
 
     use_table_recognition = profile.get('use_table_recognition', 'false').lower() == 'true'
@@ -296,7 +297,7 @@ def _paddleocr_to_structure(source: Path, profile: dict[str, str]) -> tuple[list
         raise RuntimeError('PaddleOCR PP-StructureV3 produced no results')
 
     page_structures: list[dict] = []
-    page_markdown: list[dict] = []
+    raw_outputs: list[dict] = []
     for result in results:
         result_json = cast(dict, result.json)
         result_markdown = cast(dict, result.markdown)
@@ -304,14 +305,15 @@ def _paddleocr_to_structure(source: Path, profile: dict[str, str]) -> tuple[list
         if not res_payload:
             continue
         page_structures.append(res_payload)
-        page_markdown.append(result_markdown)
+        raw_outputs.append({
+            'json': result_json,
+            'markdown': result_markdown,
+        })
 
     if not page_structures:
         raise RuntimeError('PaddleOCR PP-StructureV3 returned no structured pages')
 
-    return page_structures, {
-        'page_markdown': page_markdown,
-    }
+    return page_structures, raw_outputs
 
 
 def get_paddle_status() -> tuple[str, str | None, dict | None]:
@@ -405,12 +407,15 @@ def convert_to_markdown_with_details(
 
     if not _paddleocr_available():
         if source.suffix.lower() == '.pdf':
-            return _fallback_pdf_to_markdown(source), {
+            markdown = _fallback_pdf_to_markdown(source)
+            quality_gate = evaluate_document_quality(markdown)
+            return markdown, {
                 'engine': 'pypdf-fallback',
                 'used_fallback': True,
                 'fallback_reason': 'PaddleOCR is not installed in this worker image',
                 'profile_id': selected_profile_id,
                 'profile_label': selected_profile['label'],
+                'quality_gate': quality_gate,
                 **capability,
             }
         raise RuntimeError('PaddleOCR is not installed in this worker image')
@@ -423,6 +428,12 @@ def convert_to_markdown_with_details(
             profile_label=selected_profile['label'],
             metadata=metadata,
         )
+        quality_gate = evaluate_document_quality(
+            markdown,
+            page_structures=page_structures,
+            raw_outputs=raw_outputs,
+            block_stats=block_stats,
+        )
         return markdown, {
             'engine': 'paddleocr',
             'used_fallback': False,
@@ -434,17 +445,21 @@ def convert_to_markdown_with_details(
                 'block_count': block_stats['block_count'],
                 'block_labels': block_stats['block_labels'],
             },
+            'quality_gate': quality_gate,
             'converter': 'ppstructure-json-to-rag-markdown',
             **capability,
         }
     except Exception as exc:
         if source.suffix.lower() == '.pdf':
-            return _fallback_pdf_to_markdown(source), {
+            markdown = _fallback_pdf_to_markdown(source)
+            quality_gate = evaluate_document_quality(markdown)
+            return markdown, {
                 'engine': 'pypdf-fallback',
                 'used_fallback': True,
                 'fallback_reason': str(exc),
                 'profile_id': selected_profile_id,
                 'profile_label': selected_profile['label'],
+                'quality_gate': quality_gate,
                 **capability,
             }
         raise

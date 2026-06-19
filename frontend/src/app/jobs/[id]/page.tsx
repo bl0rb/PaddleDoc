@@ -122,6 +122,10 @@ export default function JobDetails() {
   const structure = execution?.structure as Record<string, unknown> | undefined;
   const blockCount = typeof structure?.block_count === 'number' ? structure.block_count : null;
   const pageCount = typeof structure?.page_count === 'number' ? structure.page_count : null;
+  const qualityGate = execution?.quality_gate as Record<string, unknown> | undefined;
+  const qualityGrade = typeof qualityGate?.grade === 'string' ? qualityGate.grade : null;
+  const qualityScore = typeof qualityGate?.score === 'number' ? qualityGate.score : null;
+  const qualityRecommendation = typeof qualityGate?.recommendation === 'string' ? qualityGate.recommendation : null;
 
   const saveMarkdown = async () => {
     setIsSaving(true);
@@ -159,6 +163,13 @@ export default function JobDetails() {
         {selectedProfileLabel && <p>Profile name: {selectedProfileLabel}</p>}
         {converter && <p>Converter: {converter}</p>}
         {pageCount !== null && blockCount !== null && <p>Structure: {pageCount} pages, {blockCount} blocks</p>}
+        {qualityGrade && (
+          <p>
+            Quality gate: {qualityGrade}
+            {qualityScore !== null ? ` (${qualityScore.toFixed(3)})` : ''}
+            {qualityRecommendation ? ` - ${qualityRecommendation}` : ''}
+          </p>
+        )}
         <section>
           <h2 className="mb-2 text-lg font-semibold">Processing Info</h2>
           <pre className="overflow-x-auto rounded-md border border-slate-200 bg-white p-4 text-sm text-emerald-800">
