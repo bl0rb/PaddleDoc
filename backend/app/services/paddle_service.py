@@ -603,8 +603,8 @@ def convert_to_markdown_with_details(
                 'block_count': block_stats['block_count'],
                 'block_labels': block_stats['block_labels'],
             },
-            'pdf_chunking': extraction_meta.get('pdf_chunking'),
             'quality_gate': quality_gate,
+            'pdf_chunking': extraction_meta.get('pdf_chunking'),
             'converter': 'ppstructure-json-to-rag-markdown',
             **capability,
         }

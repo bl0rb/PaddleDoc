@@ -1,13 +1,15 @@
-FROM python:3.12-slim
+FROM python:3.14-slim
 
 WORKDIR /app
 
 ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONUNBUFFERED=1
+ENV PYO3_USE_ABI3_FORWARD_COMPATIBILITY=1
 
 # Runtime libraries required by OpenCV/PaddleOCR inside slim images.
 RUN apt-get update \
 	&& apt-get install -y --no-install-recommends \
+		build-essential \
 		libglib2.0-0 \
 		libsm6 \
 		libxext6 \
