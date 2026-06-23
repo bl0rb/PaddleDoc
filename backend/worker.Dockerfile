@@ -25,6 +25,9 @@ RUN pip install --no-cache-dir -r /app/requirements.txt
 # Required by PaddleOCR doc parser engines (PP-StructureV3).
 RUN pip install --no-cache-dir onnxruntime
 
+# Required by the OpenAI vision pipeline to render PDF pages to images.
+RUN pip install --no-cache-dir pypdfium2
+
 # PaddlePaddle GPU framework (3.2.1+, required by PaddleOCR-VL-1.6).
 # Uses --extra-index-url so PyPI remains the primary index for other packages (Pillow etc.)
 # while paddlepaddle-gpu is resolved from PaddlePaddle's CUDA 12.6 index.

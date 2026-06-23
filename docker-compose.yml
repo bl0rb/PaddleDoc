@@ -22,6 +22,8 @@ services:
       DATABASE_URL: postgresql+psycopg://postgres@postgres:5432/paddledock
       REDIS_URL: redis://redis:6379/0
       CORS_ORIGINS: '["http://localhost:3000"]'
+      OPENAI_API_BASE_URL: ${OPENAI_API_BASE_URL:-}
+      OPENAI_API_BEARER_TOKEN: ${OPENAI_API_BEARER_TOKEN:-}
     volumes:
       - ./backend/storage:/app/backend/storage
     depends_on:
@@ -47,6 +49,8 @@ services:
       ONNXRUNTIME_INTRA_OP_NUM_THREADS: ${ONNXRUNTIME_INTRA_OP_NUM_THREADS:-1}
       ONNXRUNTIME_INTER_OP_NUM_THREADS: ${ONNXRUNTIME_INTER_OP_NUM_THREADS:-1}
       MALLOC_ARENA_MAX: ${MALLOC_ARENA_MAX:-2}
+      OPENAI_API_BASE_URL: ${OPENAI_API_BASE_URL:-}
+      OPENAI_API_BEARER_TOKEN: ${OPENAI_API_BEARER_TOKEN:-}
     volumes:
       - ./backend/storage:/app/backend/storage
     depends_on:

@@ -61,6 +61,7 @@ Select the PaddleOCR profile to use. Each profile trades off speed versus accura
 | PP-OCRv6 Medium (det+rec) | Highest OCR accuracy |
 | PP-StructureV3 variants | Adds stronger layout/table structure extraction |
 | PaddleOCR-VL 1.6 (0.9B) | Vision-language parsing profile for richer document understanding (best on GPU) |
+| OpenAI-compatible Vision API | Sends each page to any OpenAI-compatible vision endpoint (`gpt-4o`, Ollama, LiteLLM, etc.) |
 
 ![Processing step 3 — upload](docs/screenshots/processing-step3.png)
 
@@ -230,6 +231,29 @@ The override only adds the NVIDIA device reservation and switches the worker def
 
 If you want to force PaddleOCR-VL per upload from API/n8n, set `profile_id=paddlevl_1_6_0_9b` in the upload request.
 
+#### How GPU auto-detection works
+
+The worker image ships `paddlepaddle-gpu` (CUDA 12.6 build). At container startup the worker checks:
+
+1. `paddle.is_compiled_with_cuda()` and `paddle.device.cuda.device_count() > 0`
+2. Falls back to `torch.cuda.is_available()` if PaddlePaddle is unavailable
+
+The result is exposed as `selected_device: "gpu" | "cpu"` in the `/api/v1/paddle/status` response and shown on the home page status panel.
+
+When no NVIDIA device is reserved (plain `docker compose up`), the worker runs on CPU and selects a lighter default profile automatically. No config change is needed to switch — just start with or without `docker-compose.gpu.yml`.
+
+#### GPU memory and Celery settings
+
+The PaddleOCR-VL 1.6 model requires ~6–10 GB of GPU VRAM. The GPU override sets:
+
+| Setting | Value | Reason |
+|---|---|---|
+| `mem_limit` | `12g` | Prevents OOM kill during model load |
+| `cpus` | `4.0` | Adequate for pre/post-processing |
+| `CELERY_WORKER_POOL` | `solo` | Avoids fork-after-CUDA-init crashes |
+| `CELERY_WORKER_CONCURRENCY` | `1` | One job at a time to share GPU memory |
+| `CELERY_MAX_TASKS_PER_CHILD` | `1` | Recycles the worker process after each job to free VRAM |
+
 ### Scale Workers Safely
 
 PaddleDock supports multiple worker replicas:
@@ -311,6 +335,72 @@ npm run dev
 - `backend/alembic/versions/0002_add_password_protection.py`
 - `backend/alembic/versions/0002_job_blob_tags.py`
 - `backend/alembic/versions/0002_job_processing_info.py`
+
+## Troubleshooting
+
+### OpenAI-compatible Vision API profile
+
+PaddleDock includes an `openai_vision` profile that sends each document page as a base64 PNG to any OpenAI chat-completions-compatible endpoint and asks the model to return structured Markdown. This works with the hosted OpenAI API, Azure OpenAI, Ollama, LiteLLM, vLLM, and any other endpoint that implements `POST /v1/chat/completions` with vision support.
+
+#### Configuration
+
+Set two environment variables before starting the stack. The simplest way is a `.env` file in the repo root:
+
+```dotenv
+OPENAI_API_BASE_URL=https://api.openai.com
+OPENAI_API_BEARER_TOKEN=sk-your-key-here
+```
+
+For a local Ollama instance:
+
+```dotenv
+OPENAI_API_BASE_URL=http://host.docker.internal:11434
+OPENAI_API_BEARER_TOKEN=ollama
+```
+
+For LiteLLM or a custom proxy:
+
+```dotenv
+OPENAI_API_BASE_URL=http://litellm:4000
+OPENAI_API_BEARER_TOKEN=sk-litellm-key
+```
+
+The variables are passed to both the `backend` and `worker` containers. No image rebuild is needed — change `.env` and restart:
+
+```bash
+docker compose up -d --no-deps backend worker
+```
+
+#### How pages are sent
+
+For each PDF page the worker:
+
+1. Renders the page to a PNG at 2× scale (~144 dpi) using `pypdfium2`
+2. Base64-encodes the image and posts it to `{OPENAI_API_BASE_URL}/v1/chat/completions`
+3. Asks the model to return the full page as GFM Markdown (headings, lists, tables)
+4. Assembles all page responses into one document with RAG frontmatter and the standard quality gate
+
+Image files (PNG/JPG/JPEG) are sent directly without page splitting.
+
+#### Model selection
+
+The default model is `gpt-4o`. To use a different model, the profile `vision_model` key can be overridden at the service level or by creating a custom profile in `backend/app/services/paddle_service.py`. Examples:
+
+| Provider | Model value |
+|---|---|
+| OpenAI | `gpt-4o`, `gpt-4o-mini` |
+| Ollama | `llava`, `llama3.2-vision` |
+| Azure OpenAI | deployment name configured on the proxy |
+
+#### Using from n8n or API
+
+Set `profile_id=openai_vision` in the upload request:
+
+```bash
+curl -F "file=@invoice.pdf" -F "profile_id=openai_vision" http://localhost:8000/api/v1/upload
+```
+
+---
 
 ## Troubleshooting
 

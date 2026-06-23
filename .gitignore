@@ -14,3 +14,9 @@ frontend/node_modules/
 frontend/.next/
 .DS_Store
 pictures/
+
+# Temporary build / test artefacts (session logs, scratch files)
+*.log
+*-build.txt
+*-result.txt
+_out.txt

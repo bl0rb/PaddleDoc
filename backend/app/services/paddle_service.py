@@ -1,7 +1,11 @@
+import base64
 import html
 import importlib.util
+import json as _json
 import platform
 import re
+import urllib.error
+import urllib.request
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import cast
@@ -23,6 +27,8 @@ _PDF_CHUNK_PAGE_SIZE_BY_PROFILE: dict[str, int] = {
     'ppocrv6_small': 4,
     'ppocrv6_tiny_structurev3': 6,
     'ppocrv6_tiny': 8,
+    # OpenAI vision: always 1 page per request (vision API constraint)
+    'openai_vision': 1,
 }
 
 _PADDLE_PROFILES: dict[str, dict[str, str]] = {
@@ -88,6 +94,12 @@ _PADDLE_PROFILES: dict[str, dict[str, str]] = {
         'use_table_recognition': 'true',
         'text_detection_model_name': 'PaddleOCR-VL-1.6-0.9B',
         'text_recognition_model_name': 'PaddleOCR-VL-1.6-0.9B',
+    },
+    'openai_vision': {
+        'value': 'openai_vision',
+        'label': 'OpenAI-compatible Vision API',
+        'description': 'Sends each PDF page as a base64 image to any OpenAI-compatible vision endpoint. Configure OPENAI_API_BASE_URL and OPENAI_API_BEARER_TOKEN.',
+        'pipeline': 'openai_vision',
     },
 }
 
@@ -252,6 +264,10 @@ def _html_table_to_markdown(table_html: str) -> str:
 
 
 def _render_block_content(label: str, content: str, page_number: int) -> str:
+    # LLM-generated blocks already contain valid Markdown — return verbatim.
+    if label == 'llm_markdown':
+        return (content or '').strip()
+
     cleaned = _clean_block_text(content)
 
     if label in {'paragraph_title', 'doc_title'} and cleaned:
@@ -479,6 +495,165 @@ def _paddleocr_to_structure(
     }
 
 
+def _openai_vision_to_structure(
+    source: Path,
+    profile: dict[str, str],
+) -> tuple[list[dict], dict]:
+    """Convert a document to structured pages by sending each page as a base64
+    PNG to an OpenAI-compatible vision endpoint.
+
+    Requires:
+        OPENAI_API_BASE_URL  – e.g. https://api.openai.com or http://localhost:11434
+        OPENAI_API_BEARER_TOKEN – API key / bearer token
+
+    The endpoint is expected to be compatible with the OpenAI chat-completions API
+    (POST /v1/chat/completions). The model name is taken from the profile's
+    'vision_model' key (default: 'gpt-4o').
+    """
+    try:
+        from pypdf import PdfReader, PdfWriter  # noqa: PLC0415
+        import pypdfium2 as pdfium  # noqa: PLC0415
+    except ImportError as exc:
+        raise RuntimeError(
+            f'pypdfium2 is required for the OpenAI vision pipeline: {exc}'
+        ) from exc
+
+    api_base = (settings.openai_api_base_url or '').rstrip('/')
+    bearer_token = settings.openai_api_bearer_token or ''
+    if not api_base:
+        raise RuntimeError(
+            'OPENAI_API_BASE_URL is not configured. '
+            'Set it via environment variable before using the openai_vision profile.'
+        )
+    if not bearer_token:
+        raise RuntimeError(
+            'OPENAI_API_BEARER_TOKEN is not configured. '
+            'Set it via environment variable before using the openai_vision profile.'
+        )
+
+    model_name = profile.get('vision_model') or 'gpt-4o'
+    system_prompt = (
+        'You are a precise document OCR and layout extraction assistant. '
+        'Given an image of a document page, extract all text and structure faithfully. '
+        'Return only well-structured Markdown. '
+        'Preserve headings, bullet lists, numbered lists, and tables (as GFM tables). '
+        'Do not add commentary, preamble, or explanation outside the Markdown.'
+    )
+
+    def _page_to_base64_png(pdf_path: Path, page_index: int) -> str:
+        doc = pdfium.PdfDocument(str(pdf_path))
+        page = doc[page_index]
+        bitmap = page.render(scale=2.0)  # 144 dpi — good quality / reasonable token cost
+        pil_image = bitmap.to_pil()
+        import io  # noqa: PLC0415
+        buf = io.BytesIO()
+        pil_image.save(buf, format='PNG')
+        return base64.b64encode(buf.getvalue()).decode()
+
+    def _call_vision_api(image_b64: str, page_num: int) -> str:
+        payload = {
+            'model': model_name,
+            'messages': [
+                {'role': 'system', 'content': system_prompt},
+                {
+                    'role': 'user',
+                    'content': [
+                        {
+                            'type': 'image_url',
+                            'image_url': {'url': f'data:image/png;base64,{image_b64}'},
+                        },
+                        {
+                            'type': 'text',
+                            'text': f'Extract the full text and layout of page {page_num} as Markdown.',
+                        },
+                    ],
+                },
+            ],
+            'max_tokens': 4096,
+        }
+        data = _json.dumps(payload).encode()
+        req = urllib.request.Request(
+            f'{api_base}/v1/chat/completions',
+            data=data,
+            method='POST',
+            headers={
+                'Content-Type': 'application/json',
+                'Authorization': f'Bearer {bearer_token}',
+            },
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=120) as resp:  # noqa: S310
+                body = _json.loads(resp.read().decode())
+        except urllib.error.HTTPError as exc:
+            error_body = exc.read().decode(errors='replace')
+            raise RuntimeError(
+                f'OpenAI vision API returned HTTP {exc.code} for page {page_num}: {error_body[:400]}'
+            ) from exc
+        except urllib.error.URLError as exc:
+            raise RuntimeError(
+                f'OpenAI vision API unreachable ({api_base}): {exc.reason}'
+            ) from exc
+
+        choices = body.get('choices') or []
+        if not choices:
+            raise RuntimeError(f'OpenAI vision API returned no choices for page {page_num}')
+        content = (choices[0].get('message') or {}).get('content') or ''
+        return content.strip()
+
+    suffix = source.suffix.lower()
+    page_structures: list[dict] = []
+    raw_outputs: list[dict] = []
+
+    if suffix == '.pdf':
+        reader = PdfReader(str(source))
+        total_pages = len(reader.pages)
+        if total_pages == 0:
+            raise RuntimeError('PDF has no pages to process')
+
+        for page_index in range(total_pages):
+            page_num = page_index + 1
+            image_b64 = _page_to_base64_png(source, page_index)
+            markdown_text = _call_vision_api(image_b64, page_num)
+            # Wrap output in the same page_structures schema the rest of the pipeline expects
+            page_structures.append({
+                'parsing_res_list': [
+                    {
+                        'block_label': 'llm_markdown',
+                        'block_content': markdown_text,
+                        'block_order': 0,
+                        'block_id': 0,
+                    }
+                ]
+            })
+            raw_outputs.append({'page': page_num, 'markdown': markdown_text})
+    else:
+        # For non-PDF files (images) render directly
+        with source.open('rb') as fh:
+            image_b64 = base64.b64encode(fh.read()).decode()
+        markdown_text = _call_vision_api(image_b64, 1)
+        page_structures.append({
+            'parsing_res_list': [
+                {
+                    'block_label': 'llm_markdown',
+                    'block_content': markdown_text,
+                    'block_order': 0,
+                    'block_id': 0,
+                }
+            ]
+        })
+        raw_outputs.append({'page': 1, 'markdown': markdown_text})
+
+    if not page_structures:
+        raise RuntimeError('OpenAI vision pipeline returned no structured pages')
+
+    return page_structures, {
+        'raw_outputs': raw_outputs,
+        'pdf_chunking': {'enabled': False, 'chunk_page_size': 1},
+        'vision_model': model_name,
+        'api_base': api_base,
+    }
+
+
 def _paddlevl_to_structure(
     source: Path,
     capability: dict,
@@ -573,6 +748,7 @@ def get_paddle_capabilities() -> dict[str, list[dict[str, str]]]:
         'ppocrv6_medium',
         'ppocrv6_medium_structurev3',
         'paddlevl_1_6_0_9b',
+        'openai_vision',
     ]
     return {
         'profiles': [
@@ -637,7 +813,10 @@ def convert_to_markdown_with_details(
     try:
         selected_pipeline = selected_profile.get('pipeline', 'ppstructurev3')
         converter = 'ppstructure-json-to-rag-markdown'
-        if selected_pipeline == 'paddlevl':
+        if selected_pipeline == 'openai_vision':
+            page_structures, extraction_meta = _openai_vision_to_structure(source, selected_profile)
+            converter = 'openai-vision-to-rag-markdown'
+        elif selected_pipeline == 'paddlevl':
             page_structures, extraction_meta = _paddlevl_to_structure(source, capability)
             converter = 'paddlevl-json-to-rag-markdown'
         else:

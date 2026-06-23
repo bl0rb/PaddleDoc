@@ -17,6 +17,8 @@ class Settings(BaseSettings):
     paddle_default_profile: str = 'ppocrv6_tiny'
     paddle_timeout_seconds: int = 300
     worker_concurrency: int = 1
+    openai_api_base_url: str = ''
+    openai_api_bearer_token: str = ''
 
 
 settings = Settings()
