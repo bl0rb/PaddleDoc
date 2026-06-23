@@ -200,6 +200,16 @@ export function DocumentBrowser({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  useEffect(() => {
+    const pollMs = endpoint === 'jobs' ? 5000 : 15000;
+    const interval = setInterval(() => {
+      void loadItems();
+    }, pollMs);
+    return () => {
+      clearInterval(interval);
+    };
+  }, [endpoint, query, tag, statusFilter, fromDate, toDate]);
+
   const removeJob = async (id: string, password?: string) => {
     const url = new URL(`${API}/api/v1/jobs/${id}`);
     if (password) {

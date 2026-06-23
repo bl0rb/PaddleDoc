@@ -82,7 +82,7 @@ class HealthResponse(BaseModel):
 class RuntimeCapabilityInfo(BaseModel):
     torch_available: bool
     cuda_available: bool
-    selected_device: Literal['cuda', 'cpu']
+    selected_device: Literal['gpu', 'cuda', 'cpu']
     platform: str
     no_cuda_reason: str | None = None
 
@@ -119,8 +119,8 @@ class PaddleOption(BaseModel):
     value: str
     label: str
     description: str
-    text_detection_model_name: str
-    text_recognition_model_name: str
+    text_detection_model_name: str | None = None
+    text_recognition_model_name: str | None = None
 
 
 class PaddleCapabilitiesResponse(BaseModel):

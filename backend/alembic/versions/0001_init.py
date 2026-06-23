@@ -8,6 +8,7 @@ Create Date: 2026-06-13
 from alembic import op
 import sqlalchemy as sa
 from sqlalchemy import text
+from sqlalchemy.dialects import postgresql
 
 
 revision = '0001_init'
@@ -26,13 +27,21 @@ def upgrade() -> None:
         "END $$;"
     ))
 
+    # Use postgresql.ENUM with create_type=False so Alembic does not issue a
+    # second CREATE TYPE statement when building the table DDL.
+    jobstatus_enum = postgresql.ENUM(
+        'PENDING', 'RUNNING', 'FINISHED', 'FAILED',
+        name='jobstatus',
+        create_type=False,
+    )
+
     op.create_table(
         'jobs',
         sa.Column('id', sa.String(length=36), primary_key=True),
         sa.Column('original_filename', sa.String(length=255), nullable=False),
         sa.Column('upload_path', sa.String(length=1024), nullable=False),
         sa.Column('result_path', sa.String(length=1024), nullable=True),
-        sa.Column('status', sa.Enum('PENDING', 'RUNNING', 'FINISHED', 'FAILED', name='jobstatus', create_type=False), nullable=False),
+        sa.Column('status', jobstatus_enum, nullable=False),
         sa.Column('error_message', sa.Text(), nullable=True),
         sa.Column('created_at', sa.DateTime(timezone=True), nullable=False),
         sa.Column('updated_at', sa.DateTime(timezone=True), nullable=False),

@@ -60,6 +60,7 @@ Select the PaddleOCR profile to use. Each profile trades off speed versus accura
 | PP-OCRv6 Small (det+rec) | Balanced speed and quality |
 | PP-OCRv6 Medium (det+rec) | Highest OCR accuracy |
 | PP-StructureV3 variants | Adds stronger layout/table structure extraction |
+| PaddleOCR-VL 1.6 (0.9B) | Vision-language parsing profile for richer document understanding (best on GPU) |
 
 ![Processing step 3 — upload](docs/screenshots/processing-step3.png)
 
@@ -198,6 +199,37 @@ Services:
 - Frontend: http://localhost:3000
 - Backend: http://localhost:8000
 
+### Build targets
+
+Three images are built from this repository:
+
+| Image | Build context | Notes |
+|---|---|---|
+| `frontend` | `frontend/Dockerfile` | Next.js production build (multi-stage, Node 26 Alpine) |
+| `backend` | `backend/Dockerfile` | FastAPI API server (Python 3.13-slim) |
+| `worker` | `backend/worker.Dockerfile` | Celery worker bundling PaddleOCR + GPU-capable PaddlePaddle |
+
+The same `worker` image is used for both CPU and GPU runs: it ships `paddlepaddle-gpu` and auto-detects CUDA at runtime, falling back to CPU when no GPU is reserved. The first `worker` build downloads a large (~1.9 GB) PaddlePaddle wheel plus PaddleOCR model dependencies, so the initial build can take several minutes.
+
+### Windows + NVIDIA GPU (PaddleOCR-VL profile)
+
+For Docker Desktop on Windows with NVIDIA GPU support, use the GPU override file to switch the worker default profile to `paddlevl_1_6_0_9b`.
+
+```powershell
+Copy-Item .env.example .env
+docker compose -f docker-compose.yml -f docker-compose.gpu.yml up --build -d
+```
+
+Optional quick check:
+
+```powershell
+docker compose -f docker-compose.yml -f docker-compose.gpu.yml ps
+```
+
+The override only adds the NVIDIA device reservation and switches the worker default profile to `paddlevl_1_6_0_9b` — it does not build a separate image, so no extra image rebuild is required to switch between CPU and GPU.
+
+If you want to force PaddleOCR-VL per upload from API/n8n, set `profile_id=paddlevl_1_6_0_9b` in the upload request.
+
 ### Scale Workers Safely
 
 PaddleDock supports multiple worker replicas:
@@ -276,8 +308,31 @@ npm run dev
 ## Migrations
 
 - `backend/alembic/versions/0001_init.py`
-- `backend/alembic/versions/0002_job_processing_info.py`
+- `backend/alembic/versions/0002_add_password_protection.py`
 - `backend/alembic/versions/0002_job_blob_tags.py`
+- `backend/alembic/versions/0002_job_processing_info.py`
+
+## Troubleshooting
+
+### Windows: dashboard loads but stats, status, profiles, or jobs stay empty
+
+If the UI renders but no data loads, the browser usually cannot reach the backend on `http://localhost:8000`. On Docker Desktop + WSL2 the host can intermittently resolve `localhost` to IPv6 (`::1`), where a stale `wslrelay` listener drops connections to the published backend port while the containers still reach each other fine over the internal network.
+
+Fixes:
+
+- Recreate the backend container to rebuild a clean host port forward:
+
+  ```powershell
+  docker compose -f docker-compose.yml -f docker-compose.gpu.yml up -d --force-recreate --no-deps backend
+  ```
+
+- Or point the browser at IPv4 explicitly by setting `NEXT_PUBLIC_API_URL=http://127.0.0.1:8000` on the frontend service, then rebuild the frontend.
+
+Verify host reachability:
+
+```powershell
+curl.exe -s -o NUL -w "%{http_code}\n" http://127.0.0.1:8000/api/v1/health
+```
 
 ## Backlog / Roadmap
 

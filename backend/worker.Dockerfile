@@ -1,4 +1,4 @@
-FROM python:3.14-slim
+FROM python:3.13-slim
 
 WORKDIR /app
 
@@ -25,9 +25,17 @@ RUN pip install --no-cache-dir -r /app/requirements.txt
 # Required by PaddleOCR doc parser engines (PP-StructureV3).
 RUN pip install --no-cache-dir onnxruntime
 
-# PaddleOCR PP-StructureV3 for CPU-native document parsing (macOS Silicon + amd64).
+# PaddlePaddle GPU framework (3.2.1+, required by PaddleOCR-VL-1.6).
+# Uses --extra-index-url so PyPI remains the primary index for other packages (Pillow etc.)
+# while paddlepaddle-gpu is resolved from PaddlePaddle's CUDA 12.6 index.
+# At runtime, paddle.is_compiled_with_cuda() returns True when the container is started
+# with NVIDIA device reservation (docker-compose.gpu.yml).
+RUN pip install --no-cache-dir paddlepaddle-gpu==3.2.1 \
+    --extra-index-url https://www.paddlepaddle.org.cn/packages/stable/cu126/
+
+# PaddleOCR PP-StructureV3 and PaddleOCR-VL for document parsing.
 RUN pip install --no-cache-dir "paddleocr[doc-parser]"
 
 COPY app /app/app
 
-CMD ["sh", "-c", "celery -A app.workers.tasks worker --loglevel=${CELERY_LOG_LEVEL:-info} --concurrency=${CELERY_WORKER_CONCURRENCY:-1} --prefetch-multiplier=${CELERY_PREFETCH_MULTIPLIER:-1} -Ofair --max-tasks-per-child=${CELERY_MAX_TASKS_PER_CHILD:-5}"]
+CMD ["sh", "-c", "celery -A app.workers.tasks worker --loglevel=${CELERY_LOG_LEVEL:-info} --pool=${CELERY_WORKER_POOL:-prefork} --concurrency=${CELERY_WORKER_CONCURRENCY:-1} --prefetch-multiplier=${CELERY_PREFETCH_MULTIPLIER:-1} -Ofair --max-tasks-per-child=${CELERY_MAX_TASKS_PER_CHILD:-5}"]

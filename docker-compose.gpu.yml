@@ -1,7 +1,19 @@
-# Paddle standalone runtime is configured for CPU execution.
-# This override is intentionally left empty for compatibility with existing scripts.
+# GPU runtime override for Docker Desktop + NVIDIA.
+# Uses PaddleOCR-VL profile by default in the worker.
 
 services:
   worker:
+    mem_limit: ${WORKER_MEMORY_LIMIT:-12g}
+    cpus: ${WORKER_CPUS:-4.0}
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              capabilities: [gpu]
     environment:
-      PADDLE_DEFAULT_PROFILE: ppocrv6_tiny
+      PADDLE_DEFAULT_PROFILE: paddlevl_1_6_0_9b
+      CELERY_WORKER_POOL: solo
+      CELERY_WORKER_CONCURRENCY: 1
+      CELERY_PREFETCH_MULTIPLIER: 1
+      CELERY_MAX_TASKS_PER_CHILD: 1

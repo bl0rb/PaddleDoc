@@ -154,6 +154,61 @@ def test_get_paddle_capabilities_exposes_profiles():
     assert any(profile['value'] == 'ppocrv6_tiny_structurev3' for profile in caps['profiles'])
     assert any(profile['value'] == 'ppocrv6_small_structurev3' for profile in caps['profiles'])
     assert any(profile['value'] == 'ppocrv6_medium_structurev3' for profile in caps['profiles'])
+    assert any(profile['value'] == 'paddlevl_1_6_0_9b' for profile in caps['profiles'])
+
+
+def test_convert_to_markdown_uses_paddlevl_profile(monkeypatch, tmp_path):
+    source = tmp_path / 'sample.pdf'
+    source.write_bytes(b'%PDF-1.4 test')
+
+    monkeypatch.setattr(paddle_service, 'get_paddle_settings', lambda: {
+        'default_profile': 'ppocrv6_tiny',
+        'timeout_seconds': 30,
+    })
+    monkeypatch.setattr(paddle_service, '_paddleocr_available', lambda: True)
+    monkeypatch.setattr(
+        paddle_service,
+        '_paddlevl_to_structure',
+        lambda _source, _capability: (
+            [
+                {
+                    'page_index': 0,
+                    'parsing_res_list': [
+                        {
+                            'block_label': 'paragraph_title',
+                            'block_content': 'VL title',
+                            'block_bbox': [0, 0, 10, 10],
+                            'block_id': 1,
+                            'block_order': 1,
+                        },
+                        {
+                            'block_label': 'text',
+                            'block_content': 'VL text',
+                            'block_bbox': [0, 10, 10, 20],
+                            'block_id': 2,
+                            'block_order': 2,
+                        },
+                    ],
+                }
+            ],
+            {
+                'raw_outputs': [
+                    {
+                        'json': {'res': {'confidence': 0.99}},
+                    }
+                ],
+                'pdf_chunking': {'enabled': False, 'chunk_page_size': 1},
+            },
+        ),
+    )
+
+    markdown, details = paddle_service.convert_to_markdown_with_details(str(source), profile_id='paddlevl_1_6_0_9b')
+    assert 'VL title' in markdown
+    assert 'VL text' in markdown
+    assert details['engine'] == 'paddleocr'
+    assert details['used_fallback'] is False
+    assert details['profile_id'] == 'paddlevl_1_6_0_9b'
+    assert details['converter'] == 'paddlevl-json-to-rag-markdown'
 
 
 def test_convert_structure_to_markdown_renders_rag_blocks():

@@ -30,6 +30,7 @@ _PADDLE_PROFILES: dict[str, dict[str, str]] = {
         'value': 'ppocrv6_tiny',
         'label': 'PP-OCRv6 tiny det + rec',
         'description': 'Fastest OCR preset (det+rec) for CPU-first deployments with minimal memory usage.',
+        'pipeline': 'ppstructurev3',
         'text_detection_model_name': 'PP-OCRv6_tiny_det',
         'text_recognition_model_name': 'PP-OCRv6_tiny_rec',
         'use_table_recognition': 'false',
@@ -38,6 +39,7 @@ _PADDLE_PROFILES: dict[str, dict[str, str]] = {
         'value': 'ppocrv6_tiny_structurev3',
         'label': 'PP-StructureV3 + PP-OCRv6 tiny det + rec',
         'description': 'Tiny det+rec with PP-StructureV3 layout parsing for tables/blocks.',
+        'pipeline': 'ppstructurev3',
         'text_detection_model_name': 'PP-OCRv6_tiny_det',
         'text_recognition_model_name': 'PP-OCRv6_tiny_rec',
         'use_table_recognition': 'true',
@@ -46,6 +48,7 @@ _PADDLE_PROFILES: dict[str, dict[str, str]] = {
         'value': 'ppocrv6_small',
         'label': 'PP-OCRv6 small det + rec',
         'description': 'Balanced OCR preset (det+rec). Mapped to the standard PP-OCRv6 model family.',
+        'pipeline': 'ppstructurev3',
         'text_detection_model_name': 'PP-OCRv6_det',
         'text_recognition_model_name': 'PP-OCRv6_rec',
         'use_table_recognition': 'false',
@@ -54,6 +57,7 @@ _PADDLE_PROFILES: dict[str, dict[str, str]] = {
         'value': 'ppocrv6_small_structurev3',
         'label': 'PP-StructureV3 + PP-OCRv6 small det + rec',
         'description': 'Small det+rec with PP-StructureV3 for richer structured output.',
+        'pipeline': 'ppstructurev3',
         'text_detection_model_name': 'PP-OCRv6_det',
         'text_recognition_model_name': 'PP-OCRv6_rec',
         'use_table_recognition': 'true',
@@ -62,6 +66,7 @@ _PADDLE_PROFILES: dict[str, dict[str, str]] = {
         'value': 'ppocrv6_medium',
         'label': 'PP-OCRv6 medium det + rec',
         'description': 'Higher-accuracy OCR preset (det+rec) with larger CPU footprint than small/tiny.',
+        'pipeline': 'ppstructurev3',
         'text_detection_model_name': 'PP-OCRv6_medium_det',
         'text_recognition_model_name': 'PP-OCRv6_medium_rec',
         'use_table_recognition': 'false',
@@ -70,9 +75,19 @@ _PADDLE_PROFILES: dict[str, dict[str, str]] = {
         'value': 'ppocrv6_medium_structurev3',
         'label': 'PP-StructureV3 + PP-OCRv6 medium det + rec',
         'description': 'Best structure quality preset: medium det+rec plus PP-StructureV3 for layouts/tables.',
+        'pipeline': 'ppstructurev3',
         'text_detection_model_name': 'PP-OCRv6_medium_det',
         'text_recognition_model_name': 'PP-OCRv6_medium_rec',
         'use_table_recognition': 'true',
+    },
+    'paddlevl_1_6_0_9b': {
+        'value': 'paddlevl_1_6_0_9b',
+        'label': 'PaddleOCR-VL 1.6 (0.9B)',
+        'description': 'Vision-language parsing profile for richer document understanding on GPU-enabled deployments.',
+        'pipeline': 'paddlevl',
+        'use_table_recognition': 'true',
+        'text_detection_model_name': 'PaddleOCR-VL-1.6-0.9B',
+        'text_recognition_model_name': 'PaddleOCR-VL-1.6-0.9B',
     },
 }
 
@@ -96,7 +111,19 @@ def _has_torch() -> bool:
     return importlib.util.find_spec('torch') is not None
 
 
+def _has_paddle() -> bool:
+    return importlib.util.find_spec('paddle') is not None
+
+
 def _has_cuda() -> bool:
+    try:
+        import paddle  # noqa: PLC0415
+
+        if paddle.is_compiled_with_cuda() and paddle.device.cuda.device_count() > 0:
+            return True
+    except Exception:
+        pass
+
     try:
         import torch  # noqa: PLC0415
         return bool(torch.cuda.is_available())
@@ -108,12 +135,13 @@ def _runtime_capability() -> dict:
     cuda_available = _has_cuda()
     info: dict = {
         'torch_available': _has_torch(),
+        'paddle_available': _has_paddle(),
         'cuda_available': cuda_available,
-        'selected_device': 'cpu',
+        'selected_device': 'gpu' if cuda_available else 'cpu',
         'platform': _runtime_platform_label(),
     }
     if not cuda_available:
-        info['no_cuda_reason'] = 'PaddleOCR runtime is configured for CPU execution in this deployment'
+        info['no_cuda_reason'] = 'CUDA is unavailable in this deployment; OCR runtime will use CPU'
     return info
 
 
@@ -451,6 +479,39 @@ def _paddleocr_to_structure(
     }
 
 
+def _paddlevl_to_structure(
+    source: Path,
+    capability: dict,
+) -> tuple[list[dict], dict]:
+    from paddleocr import PaddleOCRVL  # noqa: PLC0415
+
+    device = 'gpu' if capability.get('selected_device') == 'gpu' else 'cpu'
+    pipeline = PaddleOCRVL(pipeline_version='v1.6', device=device)
+
+    results = list(pipeline.predict(str(source)))
+    if not results:
+        raise RuntimeError('PaddleOCR-VL produced no results')
+
+    page_structures: list[dict] = []
+    raw_outputs: list[dict] = []
+
+    for result in results:
+        result_json = cast(dict, getattr(result, 'json', {}) or {})
+        res_payload = cast(dict | None, result_json.get('res')) if isinstance(result_json, dict) else None
+        if not isinstance(res_payload, dict):
+            continue
+        page_structures.append(res_payload)
+        raw_outputs.append({'json': result_json})
+
+    if not page_structures:
+        raise RuntimeError('PaddleOCR-VL returned no structured pages')
+
+    return page_structures, {
+        'raw_outputs': raw_outputs,
+        'pdf_chunking': {'enabled': False, 'chunk_page_size': 1},
+    }
+
+
 def get_paddle_status() -> tuple[str, str | None, dict | None]:
     try:
         from app.workers.tasks import probe_paddle
@@ -511,6 +572,7 @@ def get_paddle_capabilities() -> dict[str, list[dict[str, str]]]:
         'ppocrv6_small_structurev3',
         'ppocrv6_medium',
         'ppocrv6_medium_structurev3',
+        'paddlevl_1_6_0_9b',
     ]
     return {
         'profiles': [
@@ -573,12 +635,18 @@ def convert_to_markdown_with_details(
         raise RuntimeError('PaddleOCR is not installed in this worker image')
 
     try:
-        page_structures, extraction_meta = _paddleocr_to_structure(
-            source,
-            selected_profile_id,
-            selected_profile,
-            capability,
-        )
+        selected_pipeline = selected_profile.get('pipeline', 'ppstructurev3')
+        converter = 'ppstructure-json-to-rag-markdown'
+        if selected_pipeline == 'paddlevl':
+            page_structures, extraction_meta = _paddlevl_to_structure(source, capability)
+            converter = 'paddlevl-json-to-rag-markdown'
+        else:
+            page_structures, extraction_meta = _paddleocr_to_structure(
+                source,
+                selected_profile_id,
+                selected_profile,
+                capability,
+            )
         markdown, block_stats = _convert_structure_to_markdown(
             page_structures,
             source_name=source.name,
@@ -605,7 +673,7 @@ def convert_to_markdown_with_details(
             },
             'quality_gate': quality_gate,
             'pdf_chunking': extraction_meta.get('pdf_chunking'),
-            'converter': 'ppstructure-json-to-rag-markdown',
+            'converter': converter,
             **capability,
         }
     except Exception as exc:
