@@ -50,9 +50,16 @@ def enforce_rate_limit(request: Request) -> None:
 
 def hash_password(password: str) -> str:
     """Hash a password using bcrypt."""
-    return bcrypt.hashpw(password.encode('utf-8'), bcrypt.gensalt()).decode('utf-8')
+    # bcrypt only considers the first 72 bytes of the input. Versions < 5.0
+    # silently truncated; 5.0+ raises ValueError instead, so truncate here
+    # ourselves to preserve the pre-5.0 behavior.
+    password_bytes = password.encode('utf-8')[:72]
+    return bcrypt.hashpw(password_bytes, bcrypt.gensalt()).decode('utf-8')
 
 
 def verify_password(password: str, password_hash: str) -> bool:
     """Verify a password against its hash."""
-    return bcrypt.checkpw(password.encode('utf-8'), password_hash.encode('utf-8'))
+    # See hash_password: truncate to bcrypt's 72-byte limit so long
+    # passwords hashed under bcrypt < 5.0 remain verifiable.
+    password_bytes = password.encode('utf-8')[:72]
+    return bcrypt.checkpw(password_bytes, password_hash.encode('utf-8'))

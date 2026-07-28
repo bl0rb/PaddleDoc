@@ -1,6 +1,6 @@
 from starlette.requests import Request
 
-from app.services.security import _client_id_from_request
+from app.services.security import _client_id_from_request, hash_password, verify_password
 
 
 def _make_request(headers: list[tuple[bytes, bytes]], client: tuple[str, int] | None = None) -> Request:
@@ -47,3 +47,27 @@ def test_client_id_unknown_when_no_headers_and_no_client() -> None:
     request = _make_request(headers=[], client=None)
 
     assert _client_id_from_request(request) == 'unknown'
+
+
+def test_hash_and_verify_password_round_trip() -> None:
+    password_hash = hash_password('correct horse battery staple')
+
+    assert verify_password('correct horse battery staple', password_hash) is True
+    assert verify_password('wrong password', password_hash) is False
+
+
+def test_hash_and_verify_password_over_72_bytes_does_not_raise() -> None:
+    long_password = 'a' * 100
+
+    password_hash = hash_password(long_password)
+
+    assert verify_password(long_password, password_hash) is True
+
+
+def test_verify_password_over_72_bytes_rejects_mismatch_within_first_72_bytes() -> None:
+    long_password = 'a' * 72 + 'b' * 28
+    other_password = 'a' * 71 + 'x' + 'b' * 28
+
+    password_hash = hash_password(long_password)
+
+    assert verify_password(other_password, password_hash) is False
