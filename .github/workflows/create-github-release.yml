@@ -1,0 +1,36 @@
+name: Create GitHub Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+
+    steps:
+      - name: Create release
+        shell: bash
+        run: |
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            echo "Release for tag ${GITHUB_REF_NAME} already exists, skipping."
+            exit 0
+          fi
+
+          # For annotated tags, keep the hand-written tag message as the release
+          # body intro; --generate-notes appends the auto-generated notes to it.
+          tag_object="$(gh api "repos/${GH_REPO}/git/ref/tags/${GITHUB_REF_NAME}" --jq '.object.type + " " + .object.sha')"
+          if [ "${tag_object%% *}" = "tag" ]; then
+            tag_message="$(gh api "repos/${GH_REPO}/git/tags/${tag_object#tag }" --jq '.message')"
+            gh release create "$GITHUB_REF_NAME" --verify-tag --generate-notes --notes "$tag_message"
+          else
+            gh release create "$GITHUB_REF_NAME" --verify-tag --generate-notes
+          fi
