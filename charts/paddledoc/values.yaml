@@ -27,6 +27,16 @@ frontend:
   nodeSelector: {}
   tolerations: []
   affinity: {}
+  podSecurityContext:
+    runAsNonRoot: true
+    runAsUser: 1000
+    runAsGroup: 1000
+    seccompProfile:
+      type: RuntimeDefault
+  containerSecurityContext:
+    allowPrivilegeEscalation: false
+    capabilities:
+      drop: ["ALL"]
 
 backend:
   enabled: true
@@ -44,6 +54,18 @@ backend:
   nodeSelector: {}
   tolerations: []
   affinity: {}
+  podSecurityContext:
+    runAsNonRoot: true
+    runAsUser: 1000
+    runAsGroup: 1000
+    fsGroup: 1000
+    fsGroupChangePolicy: OnRootMismatch
+    seccompProfile:
+      type: RuntimeDefault
+  containerSecurityContext:
+    allowPrivilegeEscalation: false
+    capabilities:
+      drop: ["ALL"]
 
 worker:
   enabled: true
@@ -57,10 +79,44 @@ worker:
   nodeSelector: {}
   tolerations: []
   affinity: {}
+  podSecurityContext:
+    runAsNonRoot: true
+    runAsUser: 1000
+    runAsGroup: 1000
+    fsGroup: 1000
+    fsGroupChangePolicy: OnRootMismatch
+    seccompProfile:
+      type: RuntimeDefault
+  containerSecurityContext:
+    allowPrivilegeEscalation: false
+    capabilities:
+      drop: ["ALL"]
+  # PaddleOCR downloads models at runtime into $HOME/.paddlex and
+  # $HOME/.paddleocr. Since the container runs as a non-root, non-writable
+  # image user, an emptyDir is mounted as $HOME so model downloads succeed.
+  modelCache:
+    enabled: true
+    # Maximum size of the emptyDir model cache (e.g. "10Gi"). Empty string
+    # means unlimited (no sizeLimit is rendered on the emptyDir).
+    sizeLimit: ""
 
 migrationJob:
   enabled: false
   backoffLimit: 2
+  # Defaults mirror backend.podSecurityContext/containerSecurityContext since
+  # this job runs the backend image.
+  podSecurityContext:
+    runAsNonRoot: true
+    runAsUser: 1000
+    runAsGroup: 1000
+    fsGroup: 1000
+    fsGroupChangePolicy: OnRootMismatch
+    seccompProfile:
+      type: RuntimeDefault
+  containerSecurityContext:
+    allowPrivilegeEscalation: false
+    capabilities:
+      drop: ["ALL"]
 
 persistence:
   enabled: true
@@ -91,6 +147,16 @@ redis:
   host: ""
   port: 6379
   resources: {}
+  podSecurityContext:
+    runAsNonRoot: true
+    runAsUser: 999
+    runAsGroup: 999
+    seccompProfile:
+      type: RuntimeDefault
+  containerSecurityContext:
+    allowPrivilegeEscalation: false
+    capabilities:
+      drop: ["ALL"]
 
 autoscaling:
   backend:

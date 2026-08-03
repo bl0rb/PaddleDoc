@@ -33,10 +33,18 @@ spec:
       imagePullSecrets:
         {{- toYaml . | nindent 8 }}
       {{- end }}
+      {{- with .Values.backend.podSecurityContext }}
+      securityContext:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
       containers:
         - name: backend
           image: "{{ .Values.backend.image.repository }}:{{ .Values.backend.image.tag }}"
           imagePullPolicy: {{ .Values.backend.image.pullPolicy }}
+          {{- with .Values.backend.containerSecurityContext }}
+          securityContext:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
           ports:
             - name: http
               containerPort: 8000
@@ -74,17 +82,19 @@ spec:
             periodSeconds: 10
           resources:
             {{- toYaml .Values.backend.resources | nindent 12 }}
-          {{- if .Values.persistence.enabled }}
           volumeMounts:
             - name: shared-storage
               mountPath: /app/backend/storage
-          {{- end }}
-      {{- if .Values.persistence.enabled }}
       volumes:
+        # Always mount shared-storage: the backend runs as non-root and cannot
+        # create /app/backend/storage inside the root-owned image filesystem.
         - name: shared-storage
+          {{- if .Values.persistence.enabled }}
           persistentVolumeClaim:
             claimName: {{ default (printf "%s-storage" (include "paddledoc.fullname" .)) .Values.persistence.existingClaim }}
-      {{- end }}
+          {{- else }}
+          emptyDir: {}
+          {{- end }}
       {{- with .Values.backend.nodeSelector }}
       nodeSelector:
         {{- toYaml . | nindent 8 }}

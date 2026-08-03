@@ -33,10 +33,18 @@ spec:
       imagePullSecrets:
         {{- toYaml . | nindent 8 }}
       {{- end }}
+      {{- with .Values.worker.podSecurityContext }}
+      securityContext:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
       containers:
         - name: worker
           image: "{{ .Values.worker.image.repository }}:{{ .Values.worker.image.tag }}"
           imagePullPolicy: {{ .Values.worker.image.pullPolicy }}
+          {{- with .Values.worker.containerSecurityContext }}
+          securityContext:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
           env:
             - name: DATABASE_PASSWORD
               valueFrom:
@@ -54,19 +62,38 @@ spec:
                   key: REDIS_URL
             - name: PADDLE_DEFAULT_PROFILE
               value: {{ .Values.worker.paddleDefaultProfile | quote }}
+            {{- if .Values.worker.modelCache.enabled }}
+            - name: HOME
+              value: /home/paddledoc
+            {{- end }}
           resources:
             {{- toYaml .Values.worker.resources | nindent 12 }}
-          {{- if .Values.persistence.enabled }}
           volumeMounts:
             - name: shared-storage
               mountPath: /app/backend/storage
-          {{- end }}
-      {{- if .Values.persistence.enabled }}
+            {{- if .Values.worker.modelCache.enabled }}
+            - name: model-cache
+              mountPath: /home/paddledoc
+            {{- end }}
       volumes:
+        # Always mount shared-storage: the worker runs as non-root and cannot
+        # create /app/backend/storage inside the root-owned image filesystem.
         - name: shared-storage
+          {{- if .Values.persistence.enabled }}
           persistentVolumeClaim:
             claimName: {{ default (printf "%s-storage" (include "paddledoc.fullname" .)) .Values.persistence.existingClaim }}
-      {{- end }}
+          {{- else }}
+          emptyDir: {}
+          {{- end }}
+        {{- if .Values.worker.modelCache.enabled }}
+        - name: model-cache
+          emptyDir:
+            {{- if .Values.worker.modelCache.sizeLimit }}
+            sizeLimit: {{ .Values.worker.modelCache.sizeLimit }}
+            {{- else }}
+            {}
+            {{- end }}
+        {{- end }}
       {{- with .Values.worker.nodeSelector }}
       nodeSelector:
         {{- toYaml . | nindent 8 }}

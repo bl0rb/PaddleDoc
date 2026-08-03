@@ -56,7 +56,7 @@ helm upgrade --install PaddleDoc ./charts/paddledoc \
 
 ## Important Notes
 
-1. If `persistence.enabled=true`, your StorageClass should support `ReadWriteMany` so backend and worker can access shared files.
+1. If `persistence.enabled=true`, your StorageClass should support `ReadWriteMany` so backend and worker can access shared files. With `persistence.enabled=false`, backend and worker fall back to per-pod `emptyDir` volumes at the storage path (non-persistent, not shared between pods) so they keep working as non-root.
 2. Set `frontend.apiUrl` to a browser-reachable backend URL (usually your backend ingress host).
 3. PostgreSQL must be external. Configure `database.*` and provide `database.passwordSecret`.
 4. Default mode runs Alembic in backend startup (`backend.runAlembicOnStartup=true`).
@@ -77,6 +77,53 @@ This chart supports two scaling modes for backend and worker:
 
 When HPA is enabled, deployment `replicas` is automatically aligned to `minReplicas`.
 
+## Pod security / PSA
+
+All templates (`frontend`, `backend`, `worker`, `redis`, and the
+`migrationJob` hook) set restricted-compliant `securityContext` defaults, so
+this chart passes the Pod Security Admission `restricted:latest` profile
+out of the box on a namespace that enforces it:
+
+- pod-level: `runAsNonRoot: true`, an explicit `runAsUser`/`runAsGroup`, and
+  `seccompProfile.type: RuntimeDefault`
+- container-level: `allowPrivilegeEscalation: false` and
+  `capabilities.drop: ["ALL"]`
+
+Defaults per component:
+
+| Component | `runAsUser`/`runAsGroup` | `fsGroup` | Notes |
+|---|---|---|---|
+| `frontend` | 1000/1000 | - | matches the `node` uid in the `node:26-alpine` image |
+| `backend` | 1000/1000 | 1000 (`fsGroupChangePolicy: OnRootMismatch`) | `fsGroup` keeps the storage PVC writable for a non-root user |
+| `worker` | 1000/1000 | 1000 (`fsGroupChangePolicy: OnRootMismatch`) | same as backend; also runs the OCR model cache (see below) |
+| `redis` | 999/999 | - | 999 is the `redis` user baked into the official `redis:7` image |
+| `migrationJob` | 1000/1000 | 1000 (`fsGroupChangePolicy: OnRootMismatch`) | runs the backend image, so it mirrors `backend`'s context |
+
+Every value is overridable, e.g. `frontend.podSecurityContext`,
+`backend.containerSecurityContext`, `worker.podSecurityContext`,
+`redis.containerSecurityContext`, `migrationJob.podSecurityContext`, etc.
+`readOnlyRootFilesystem` is intentionally left unset because the backend and
+worker containers write to `/tmp` and application directories at runtime.
+
+### Worker model cache
+
+PaddleOCR downloads model weights at runtime into `$HOME/.paddlex` and
+`$HOME/.paddleocr`. Because the worker container now runs as a non-root user
+(uid 1000) without a writable home directory baked into the image, the chart
+mounts a writable `emptyDir` at `/home/paddledoc` and sets `HOME` to that
+path so model downloads succeed:
+
+- `worker.modelCache.enabled` (default `true`) adds the `model-cache`
+  `emptyDir` volume and mount, and sets `HOME=/home/paddledoc` on the worker
+  container. Set to `false` if you bake models into the image or provide
+  your own writable `$HOME` some other way.
+- `worker.modelCache.sizeLimit` (default `""`, unlimited) sets the
+  `emptyDir.sizeLimit`; leave empty to let the node decide.
+
+This volume is independent of `persistence.enabled` (which controls the
+shared `/app/backend/storage` PVC) — it is added whenever
+`worker.modelCache.enabled` is `true`, regardless of the persistence setting.
+
 ## Database Configuration (External Only)
 
 This chart uses an external-database pattern and supports only external PostgreSQL:
@@ -87,11 +134,11 @@ database:
   useExternal: true
   host: "your-postgres-host.com"
   port: 5432
-  database: PaddleDoc
+  database: paddledoc
   schema: "public"
-  user: PaddleDoc
+  user: paddledoc
   passwordSecret:
-    name: "PaddleDoc-db-secret"
+    name: "paddledoc-db-secret"
     key: "password"
 ```
 
@@ -101,7 +148,7 @@ Example secret:
 apiVersion: v1
 kind: Secret
 metadata:
-  name: PaddleDoc-db-secret
+  name: paddledoc-db-secret
 type: Opaque
 stringData:
   password: "change-me"
@@ -133,6 +180,8 @@ The following list contains all configurable parameters currently supported by t
 | `frontend.nodeSelector` | map | `{}` |
 | `frontend.tolerations` | list | `[]` |
 | `frontend.affinity` | map | `{}` |
+| `frontend.podSecurityContext` | map | `{runAsNonRoot: true, runAsUser: 1000, runAsGroup: 1000, seccompProfile: {type: RuntimeDefault}}` |
+| `frontend.containerSecurityContext` | map | `{allowPrivilegeEscalation: false, capabilities: {drop: [ALL]}}` |
 | `backend.enabled` | bool | `true` |
 | `backend.replicaCount` | int | `1` |
 | `backend.image.repository` | string | `ghcr.io/bl0rb/PaddleDoc-backend` |
@@ -146,6 +195,8 @@ The following list contains all configurable parameters currently supported by t
 | `backend.nodeSelector` | map | `{}` |
 | `backend.tolerations` | list | `[]` |
 | `backend.affinity` | map | `{}` |
+| `backend.podSecurityContext` | map | `{runAsNonRoot: true, runAsUser: 1000, runAsGroup: 1000, fsGroup: 1000, fsGroupChangePolicy: OnRootMismatch, seccompProfile: {type: RuntimeDefault}}` |
+| `backend.containerSecurityContext` | map | `{allowPrivilegeEscalation: false, capabilities: {drop: [ALL]}}` |
 | `worker.enabled` | bool | `true` |
 | `worker.replicaCount` | int | `1` |
 | `worker.image.repository` | string | `ghcr.io/bl0rb/PaddleDoc-worker` |
@@ -156,8 +207,14 @@ The following list contains all configurable parameters currently supported by t
 | `worker.nodeSelector` | map | `{}` |
 | `worker.tolerations` | list | `[]` |
 | `worker.affinity` | map | `{}` |
+| `worker.podSecurityContext` | map | `{runAsNonRoot: true, runAsUser: 1000, runAsGroup: 1000, fsGroup: 1000, fsGroupChangePolicy: OnRootMismatch, seccompProfile: {type: RuntimeDefault}}` |
+| `worker.containerSecurityContext` | map | `{allowPrivilegeEscalation: false, capabilities: {drop: [ALL]}}` |
+| `worker.modelCache.enabled` | bool | `true` |
+| `worker.modelCache.sizeLimit` | string | `""` |
 | `migrationJob.enabled` | bool | `false` |
 | `migrationJob.backoffLimit` | int | `2` |
+| `migrationJob.podSecurityContext` | map | `{runAsNonRoot: true, runAsUser: 1000, runAsGroup: 1000, fsGroup: 1000, fsGroupChangePolicy: OnRootMismatch, seccompProfile: {type: RuntimeDefault}}` |
+| `migrationJob.containerSecurityContext` | map | `{allowPrivilegeEscalation: false, capabilities: {drop: [ALL]}}` |
 | `persistence.enabled` | bool | `true` |
 | `persistence.storageClassName` | string | `""` |
 | `persistence.accessModes` | list | `[ReadWriteMany]` |
@@ -167,9 +224,9 @@ The following list contains all configurable parameters currently supported by t
 | `database.useExternal` | bool | `true` |
 | `database.host` | string | `""` |
 | `database.port` | int | `5432` |
-| `database.database` | string | `PaddleDoc` |
+| `database.database` | string | `paddledoc` |
 | `database.schema` | string | `public` |
-| `database.user` | string | `PaddleDoc` |
+| `database.user` | string | `paddledoc` |
 | `database.passwordSecret.name` | string | `""` |
 | `database.passwordSecret.key` | string | `password` |
 | `redis.enabled` | bool | `true` |
@@ -179,6 +236,8 @@ The following list contains all configurable parameters currently supported by t
 | `redis.host` | string | `""` |
 | `redis.port` | int | `6379` |
 | `redis.resources` | map | `{}` |
+| `redis.podSecurityContext` | map | `{runAsNonRoot: true, runAsUser: 999, runAsGroup: 999, seccompProfile: {type: RuntimeDefault}}` |
+| `redis.containerSecurityContext` | map | `{allowPrivilegeEscalation: false, capabilities: {drop: [ALL]}}` |
 | `autoscaling.backend.enabled` | bool | `false` |
 | `autoscaling.backend.minReplicas` | int | `1` |
 | `autoscaling.backend.maxReplicas` | int | `5` |
@@ -221,7 +280,7 @@ frontend:
   enabled: true
   replicaCount: 1
   image:
-    repository: ghcr.io/bl0rb/PaddleDoc-frontend
+    repository: ghcr.io/bl0rb/paddledoc-frontend
     tag: "latest"
     pullPolicy: IfNotPresent
   service:
@@ -232,12 +291,22 @@ frontend:
   nodeSelector: {}
   tolerations: []
   affinity: {}
+  podSecurityContext:
+    runAsNonRoot: true
+    runAsUser: 1000
+    runAsGroup: 1000
+    seccompProfile:
+      type: RuntimeDefault
+  containerSecurityContext:
+    allowPrivilegeEscalation: false
+    capabilities:
+      drop: ["ALL"]
 
 backend:
   enabled: true
   replicaCount: 1
   image:
-    repository: ghcr.io/bl0rb/PaddleDoc-backend
+    repository: ghcr.io/bl0rb/paddledoc-backend
     tag: "latest"
     pullPolicy: IfNotPresent
   service:
@@ -249,12 +318,24 @@ backend:
   nodeSelector: {}
   tolerations: []
   affinity: {}
+  podSecurityContext:
+    runAsNonRoot: true
+    runAsUser: 1000
+    runAsGroup: 1000
+    fsGroup: 1000
+    fsGroupChangePolicy: OnRootMismatch
+    seccompProfile:
+      type: RuntimeDefault
+  containerSecurityContext:
+    allowPrivilegeEscalation: false
+    capabilities:
+      drop: ["ALL"]
 
 worker:
   enabled: true
   replicaCount: 1
   image:
-    repository: ghcr.io/bl0rb/PaddleDoc-worker
+    repository: ghcr.io/bl0rb/paddledoc-worker
     tag: "latest"
     pullPolicy: IfNotPresent
   paddleDefaultProfile: ppocrv6_tiny
@@ -262,10 +343,37 @@ worker:
   nodeSelector: {}
   tolerations: []
   affinity: {}
+  podSecurityContext:
+    runAsNonRoot: true
+    runAsUser: 1000
+    runAsGroup: 1000
+    fsGroup: 1000
+    fsGroupChangePolicy: OnRootMismatch
+    seccompProfile:
+      type: RuntimeDefault
+  containerSecurityContext:
+    allowPrivilegeEscalation: false
+    capabilities:
+      drop: ["ALL"]
+  modelCache:
+    enabled: true
+    sizeLimit: ""
 
 migrationJob:
   enabled: false
   backoffLimit: 2
+  podSecurityContext:
+    runAsNonRoot: true
+    runAsUser: 1000
+    runAsGroup: 1000
+    fsGroup: 1000
+    fsGroupChangePolicy: OnRootMismatch
+    seccompProfile:
+      type: RuntimeDefault
+  containerSecurityContext:
+    allowPrivilegeEscalation: false
+    capabilities:
+      drop: ["ALL"]
 
 persistence:
   enabled: true
@@ -280,9 +388,9 @@ database:
   useExternal: true
   host: ""
   port: 5432
-  database: PaddleDoc
+  database: paddledoc
   schema: public
-  user: PaddleDoc
+  user: paddledoc
   passwordSecret:
     name: ""
     key: password
@@ -296,6 +404,16 @@ redis:
   host: ""
   port: 6379
   resources: {}
+  podSecurityContext:
+    runAsNonRoot: true
+    runAsUser: 999
+    runAsGroup: 999
+    seccompProfile:
+      type: RuntimeDefault
+  containerSecurityContext:
+    allowPrivilegeEscalation: false
+    capabilities:
+      drop: ["ALL"]
 
 autoscaling:
   backend:
@@ -315,7 +433,7 @@ ingress:
     className: ""
     annotations: {}
     hosts:
-      - host: PaddleDoc.local
+      - host: paddledoc.local
         paths:
           - path: /
             pathType: Prefix
@@ -325,7 +443,7 @@ ingress:
     className: ""
     annotations: {}
     hosts:
-      - host: api.PaddleDoc.local
+      - host: api.paddledoc.local
         paths:
           - path: /
             pathType: Prefix

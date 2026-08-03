@@ -86,3 +86,6 @@ jobs:
 
       - name: Lint Helm chart
         run: helm lint charts/paddledoc
+
+      - name: Render Helm chart
+        run: helm template test charts/paddledoc -f charts/paddledoc/examples/nas-cpu-external-postgres.yaml > /dev/null
