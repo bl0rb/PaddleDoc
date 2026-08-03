@@ -83,14 +83,30 @@ def save_upload(file: UploadFile, storage_folder: str, file_id: str) -> tuple[st
 
     total_bytes = 0
     payload = bytearray()
-    with target_path.open('wb') as handle:
-        while chunk := file.file.read(1024 * 1024):
-            total_bytes += len(chunk)
-            if total_bytes > settings.max_upload_bytes:
-                target_path.unlink(missing_ok=True)
-                raise HTTPException(status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, detail='File too large')
-            handle.write(chunk)
-            payload.extend(chunk)
+    oversized = False
+    try:
+        with target_path.open('wb') as handle:
+            while chunk := file.file.read(1024 * 1024):
+                total_bytes += len(chunk)
+                if total_bytes > settings.max_upload_bytes:
+                    oversized = True
+                    break
+                handle.write(chunk)
+                payload.extend(chunk)
+    except Exception:
+        # e.g. client disconnect mid-stream: the closed handle has already
+        # committed a partial object (on Mountpoint-for-S3, close() commits),
+        # so remove it before propagating.
+        target_path.unlink(missing_ok=True)
+        raise
+
+    # On Mountpoint-for-S3, close() is what commits the object, so the handle
+    # must be closed (via the `with` block above) before we unlink the target.
+    # Unlinking while the handle is still open would race the close, either
+    # raising on the unlink or leaving a partial object behind after close.
+    if oversized:
+        target_path.unlink(missing_ok=True)
+        raise HTTPException(status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, detail='File too large')
 
     return str(target_path.resolve()), file_id, bytes(payload), total_bytes
 

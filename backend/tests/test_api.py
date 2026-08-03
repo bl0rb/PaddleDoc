@@ -1,6 +1,8 @@
 import io
 import zipfile
 
+import pytest
+from fastapi import HTTPException, UploadFile
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
@@ -678,3 +680,210 @@ def test_worker_restart_requeues_running_jobs(monkeypatch, tmp_path):
     assert job is not None
     assert job.status == JobStatus.PENDING
     db.close()
+
+
+def test_upload_rejects_oversize_file_without_partial_remnant(monkeypatch, tmp_path):
+    from app.core.config import settings
+
+    settings.uploads_dir = tmp_path / 'uploads'
+    settings.results_dir = tmp_path / 'results'
+    monkeypatch.setattr(settings, 'max_upload_bytes', 5)
+
+    response = client.post(
+        '/api/v1/upload',
+        files={'file': ('document.pdf', b'%PDF-well-over-the-limit', 'application/pdf')},
+        data={'profile_id': 'ppocrv6_tiny', 'email': 'oversize@example.com'},
+    )
+    assert response.status_code == 413
+
+    leftover_files = [path for path in settings.uploads_dir.rglob('*') if path.is_file()]
+    assert leftover_files == []
+
+
+def test_save_upload_rejects_oversize_after_multiple_chunks_no_partial_remnant(monkeypatch, tmp_path):
+    """The 413 path in save_upload is only interesting once >1 chunk has
+    already been written to disk (the oversize threshold is crossed on a
+    later 1MB read, not the first). This exercises that multi-chunk case
+    directly against save_upload/UploadFile, bypassing HTTP multipart
+    overhead, and checks total_bytes accounting plus full cleanup.
+    """
+    from app.core.config import settings
+    from app.services import storage
+
+    settings.uploads_dir = tmp_path / 'uploads'
+    settings.results_dir = tmp_path / 'results'
+    chunk_size = 1024 * 1024
+    # Limit sits inside the *second* chunk, so the first chunk is genuinely
+    # written to the open handle before the loop detects the overage.
+    monkeypatch.setattr(settings, 'max_upload_bytes', int(chunk_size * 1.5))
+
+    data = b'A' * (chunk_size * 3)
+    upload = UploadFile(file=io.BytesIO(data), filename='huge.pdf')
+    upload.headers = {'content-type': 'application/pdf'}
+
+    with pytest.raises(HTTPException) as exc_info:
+        storage.save_upload(upload, 'inbox', 'huge-file-id')
+
+    assert exc_info.value.status_code == 413
+    assert exc_info.value.detail == 'File too large'
+
+    leftover_files = [path for path in settings.uploads_dir.rglob('*') if path.is_file()]
+    assert leftover_files == []
+
+
+def test_create_folder_writes_keep_marker(tmp_path):
+    from app.core.config import settings
+
+    settings.uploads_dir = tmp_path / 'uploads'
+    settings.results_dir = tmp_path / 'results'
+
+    response = client.post(
+        '/api/v1/folders',
+        json={'folder': 'finance', 'subfolder': 'q3'},
+    )
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload['path'] == 'finance/q3'
+
+    marker = settings.uploads_dir / 'finance' / 'q3' / '.keep'
+    assert marker.exists()
+    assert marker.is_file()
+    assert marker.read_bytes() == b''
+
+    # .keep must not surface as a result in the markdown browser listing.
+    listing = client.get('/api/v1/markdown-files')
+    assert listing.status_code == 200
+    assert all('.keep' not in item['path'] for item in listing.json()['items'])
+
+
+def test_process_job_deletes_stale_result_before_rewriting(monkeypatch, tmp_path):
+    """Regression test for the delete-then-create fix in process_job.
+
+    On Mountpoint-for-S3 there is no reliable overwrite-in-place, so a
+    retried/requeued job must unlink any stale result object before writing
+    the fresh one. This calls the task body directly (not `.delay`) so the
+    real write path executes, and asserts both the call order and that the
+    final content reflects the new run rather than the stale one.
+    """
+    from pathlib import Path
+
+    from app.core.config import settings
+    from app.workers import tasks
+
+    monkeypatch.setattr(tasks, 'SessionLocal', TestingSessionLocal)
+    settings.uploads_dir = tmp_path / 'uploads'
+    settings.results_dir = tmp_path / 'results'
+
+    upload_path = settings.uploads_dir / 'inbox' / 'job-retry.pdf'
+    upload_path.parent.mkdir(parents=True, exist_ok=True)
+    upload_path.write_bytes(b'%PDF-1.4 fake upload content')
+
+    result_path = (settings.results_dir / 'inbox' / 'job-retry.md').resolve()
+    result_path.parent.mkdir(parents=True, exist_ok=True)
+    result_path.write_text('# stale result from a prior attempt', encoding='utf-8')
+
+    db = TestingSessionLocal()
+    db.query(Job).filter(Job.id == 'job-retry').delete()
+    db.commit()
+    db.add(
+        Job(
+            id='job-retry',
+            original_filename='job-retry.pdf',
+            upload_path=str(upload_path),
+            result_path=str(result_path),
+            upload_content=b'%PDF-1.4 fake upload content',
+            upload_mime_type='application/pdf',
+            upload_size_bytes=len(b'%PDF-1.4 fake upload content'),
+            status=JobStatus.PENDING,
+            processing_info={'settings': {'storage_folder': 'inbox'}},
+        )
+    )
+    db.commit()
+    db.close()
+
+    monkeypatch.setattr(
+        tasks,
+        'convert_to_markdown_with_details',
+        lambda *args, **kwargs: ('# fresh result from this run', {'page_count': 1}),
+    )
+
+    call_order: list[str] = []
+    original_unlink = Path.unlink
+    original_write_text = Path.write_text
+
+    def tracking_unlink(self, *args, **kwargs):
+        if self.resolve() == result_path:
+            call_order.append('unlink')
+        return original_unlink(self, *args, **kwargs)
+
+    def tracking_write_text(self, *args, **kwargs):
+        if self.resolve() == result_path:
+            call_order.append('write_text')
+        return original_write_text(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, 'unlink', tracking_unlink)
+    monkeypatch.setattr(Path, 'write_text', tracking_write_text)
+
+    tasks.process_job('job-retry')
+
+    assert call_order == ['unlink', 'write_text']
+    assert result_path.read_text(encoding='utf-8') == '# fresh result from this run'
+
+    db = TestingSessionLocal()
+    job = db.get(Job, 'job-retry')
+    assert job is not None
+    assert job.status == JobStatus.FINISHED
+    assert job.error_message is None
+    db.close()
+
+
+def test_create_folder_keep_marker_survives_job_deletion_cleanup(tmp_path):
+    """Documents a side effect of the .keep marker: _cleanup_empty_parents
+    only rmdir()s directories that are actually empty, so an explicitly
+    created upload folder (which now always contains .keep) is never pruned
+    after its last job is deleted, while the matching results folder (which
+    has no marker) still gets pruned as before.
+    """
+    from app.core.config import settings
+
+    settings.uploads_dir = tmp_path / 'uploads'
+    settings.results_dir = tmp_path / 'results'
+
+    create_response = client.post(
+        '/api/v1/folders',
+        json={'folder': 'ops', 'subfolder': 'weekly'},
+    )
+    assert create_response.status_code == 200
+
+    upload_file = settings.uploads_dir / 'ops' / 'weekly' / 'keep-job.pdf'
+    result_file = settings.results_dir / 'ops' / 'weekly' / 'keep-job.md'
+    upload_file.write_bytes(b'pdf')
+    result_file.write_text('# markdown', encoding='utf-8')
+
+    db = TestingSessionLocal()
+    db.query(Job).filter(Job.id == 'keep-job').delete()
+    db.commit()
+    db.add(
+        Job(
+            id='keep-job',
+            original_filename='keep-job.pdf',
+            upload_path=str(upload_file),
+            result_path=str(result_file),
+            upload_content=b'pdf',
+            upload_mime_type='application/pdf',
+            upload_size_bytes=3,
+            status=JobStatus.FINISHED,
+            processing_info={'settings': {'folder': 'ops', 'subfolder': 'weekly', 'storage_folder': 'ops/weekly'}},
+        )
+    )
+    db.commit()
+    db.close()
+
+    response = client.delete('/api/v1/jobs/keep-job')
+    assert response.status_code == 200
+
+    # Upload-side folder persists because of .keep (folder created via API).
+    assert (settings.uploads_dir / 'ops' / 'weekly').exists()
+    assert (settings.uploads_dir / 'ops' / 'weekly' / '.keep').exists()
+    # Results-side folder (no marker) is pruned once empty, as before.
+    assert not (settings.results_dir / 'ops' / 'weekly').exists()

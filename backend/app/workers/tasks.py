@@ -300,6 +300,11 @@ def process_job(
         settings = info.get('settings') if isinstance(info.get('settings'), dict) else {}
         storage_folder = settings.get('storage_folder') if isinstance(settings.get('storage_folder'), str) else None
         result_path = _resolve_result_path(job, storage_folder, job_id)
+        # On the crash-recovery/requeue path the object may already exist from a
+        # prior attempt. Mountpoint-for-S3 has no rename/append and does not
+        # reliably support overwrite-in-place, so delete-then-create is the
+        # robust pattern regardless of whether the allow-overwrite mount flag is set.
+        result_path.unlink(missing_ok=True)
         result_path.write_text(markdown, encoding='utf-8')
 
         job.status = JobStatus.FINISHED

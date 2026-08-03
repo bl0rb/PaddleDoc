@@ -1081,8 +1081,18 @@ def create_folder(payload: FolderActionRequest) -> FolderActionResponse:
     if not folder_path:
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail='Folder or subfolder required')
 
-    (settings.uploads_dir.resolve() / folder_path).mkdir(parents=True, exist_ok=True)
+    uploads_folder = settings.uploads_dir.resolve() / folder_path
+    uploads_folder.mkdir(parents=True, exist_ok=True)
     (settings.results_dir.resolve() / folder_path).mkdir(parents=True, exist_ok=True)
+
+    # On Mountpoint-for-S3, mkdir() is local-only until a file is written inside
+    # it, so an empty folder never becomes a real prefix in S3 and stays
+    # invisible to other pods. Write an empty marker file to force the prefix
+    # to actually exist.
+    marker = uploads_folder / '.keep'
+    if not marker.exists():
+        marker.write_bytes(b'')
+
     return FolderActionResponse(path=folder_path)
 
 
