@@ -63,6 +63,38 @@ helm upgrade --install PaddleDoc ./charts/paddledoc \
 5. For multi-replica backend setups, prefer `migrationJob.enabled=true` with `backend.runAlembicOnStartup=false`.
 6. OCR profile defaults to CPU-safe `ppocrv6_tiny`; switch to a GPU-oriented profile only when your cluster nodes provide NVIDIA runtime/device plugin.
 
+## Running without shared storage
+
+Since app v1.0.12, `persistence.enabled=false` is a fully supported deployment
+mode, not just a fallback: each `backend` and `worker` pod gets its own
+private, non-persistent `emptyDir` at the storage path, and no volume is
+shared between pods. This works because uploads, OCR results, and editor
+versions are all persisted to PostgreSQL (as the single source of truth for
+shared artifacts) rather than to the filesystem — the `emptyDir` is only used
+as transient scratch space during a job's processing.
+
+Practical implications:
+
+- No `ReadWriteMany` StorageClass is required; `persistence.enabled=false`
+  works on any cluster, including single-node/NAS setups with only
+  `ReadWriteOnce` storage.
+- Backend and worker pods can scale, restart, and reschedule independently
+  without losing or diverging on uploaded files or results.
+- If you front the backend with an ingress, the ingress controller's
+  request body-size limit must be raised to cover `backend.maxUploadBytes`
+  (or the app default of 100 MiB if unset). For ingress-nginx, set:
+
+  ```yaml
+  ingress:
+    backend:
+      annotations:
+        nginx.ingress.kubernetes.io/proxy-body-size: "100m"
+  ```
+
+  Keep this value at least as large as `backend.maxUploadBytes` so large
+  uploads aren't rejected by the ingress controller before they reach the
+  backend.
+
 ## Scaling Logic
 
 This chart supports two scaling modes for backend and worker:
@@ -191,6 +223,7 @@ The following list contains all configurable parameters currently supported by t
 | `backend.service.port` | int | `8000` |
 | `backend.corsOrigins` | string | `["http://localhost:3000"]` |
 | `backend.runAlembicOnStartup` | bool | `true` |
+| `backend.maxUploadBytes` | string | `""` |
 | `backend.resources` | map | `{}` |
 | `backend.nodeSelector` | map | `{}` |
 | `backend.tolerations` | list | `[]` |
@@ -314,6 +347,7 @@ backend:
     port: 8000
   corsOrigins: '["http://localhost:3000"]'
   runAlembicOnStartup: true
+  maxUploadBytes: ""
   resources: {}
   nodeSelector: {}
   tolerations: []

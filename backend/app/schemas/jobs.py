@@ -45,7 +45,10 @@ class JobSaveRequest(BaseModel):
 class JobSaveResponse(BaseModel):
     job_id: str
     version: int
-    path: str
+    # Editor versions are now stored as job_markdown_versions rows rather
+    # than on-disk '.v{n}.md' files (no shared volume between backend and
+    # worker), so there is no longer a filesystem path to report here.
+    path: str | None = None
     updated_at: datetime
 
 

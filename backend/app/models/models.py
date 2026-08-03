@@ -2,7 +2,7 @@ import enum
 import uuid
 from datetime import datetime, timezone
 
-from sqlalchemy import Column, JSON, DateTime, Enum, ForeignKey, Integer, LargeBinary, String, Table, Text
+from sqlalchemy import Column, JSON, DateTime, Enum, ForeignKey, Integer, LargeBinary, String, Table, Text, UniqueConstraint
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 
@@ -46,6 +46,33 @@ class Job(Base):
     )
 
     tags: Mapped[list['Tag']] = relationship(secondary=job_tags, back_populates='jobs')
+    markdown_versions: Mapped[list['JobMarkdownVersion']] = relationship(
+        back_populates='job',
+        cascade='all, delete-orphan',
+        order_by='JobMarkdownVersion.version',
+    )
+
+
+class JobMarkdownVersion(Base):
+    """Editor save history for a job's markdown.
+
+    Replaces the old on-disk `.v{n}.md` files: with no shared volume between
+    backend and worker pods, every edited version is persisted as a row here
+    instead so it stays readable from any pod.
+    """
+
+    __tablename__ = 'job_markdown_versions'
+    __table_args__ = (
+        UniqueConstraint('job_id', 'version', name='uq_job_markdown_versions_job_id_version'),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    job_id: Mapped[str] = mapped_column(String(36), ForeignKey('jobs.id', ondelete='CASCADE'), nullable=False, index=True)
+    version: Mapped[int] = mapped_column(Integer, nullable=False)
+    content: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+
+    job: Mapped[Job] = relationship(back_populates='markdown_versions')
 
 
 class Document(Base):

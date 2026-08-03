@@ -1,5 +1,6 @@
 import io
 import zipfile
+from pathlib import Path
 
 import pytest
 from fastapi import HTTPException, UploadFile
@@ -7,9 +8,10 @@ from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
+from app.api.routes import _JOB_LIST_PAGE_LIMIT_MAX
 from app.database.session import get_db
 from app.main import app
-from app.models.models import Base, Job, JobStatus
+from app.models.models import Base, Job, JobMarkdownVersion, JobStatus
 
 TEST_DB = 'sqlite:///./test.db'
 engine = create_engine(TEST_DB, future=True)
@@ -193,30 +195,91 @@ def test_collection_flow(monkeypatch, tmp_path):
     assert delayed[0]['department'] == ''
 
 
-def test_markdown_browser_lists_files(tmp_path, monkeypatch):
+def test_markdown_browser_lists_files(tmp_path):
+    """DB-derived: the browser tree is built from Job rows with
+    result_markdown, not from anything on disk. Field-for-field the response
+    shape (path/filename/folder/size_bytes/updated_at) matches what the old
+    filesystem-scanning handler produced.
+    """
+    db = TestingSessionLocal()
+    db.query(Job).filter(Job.id.in_(['job-1', 'job-2'])).delete(synchronize_session=False)
+    db.add_all(
+        [
+            Job(
+                id='job-1',
+                original_filename='single.pdf',
+                upload_path=str(tmp_path / 'single.pdf'),
+                upload_content=b's',
+                upload_mime_type='application/pdf',
+                upload_size_bytes=1,
+                status=JobStatus.FINISHED,
+                result_markdown='# single',
+                # No folder/subfolder recorded -> synthesized under 'inbox'.
+            ),
+            Job(
+                id='job-2',
+                original_filename='collection.pdf',
+                upload_path=str(tmp_path / 'collection.pdf'),
+                upload_content=b'c',
+                upload_mime_type='application/pdf',
+                upload_size_bytes=1,
+                status=JobStatus.FINISHED,
+                result_markdown='# collection',
+                processing_info={'settings': {'folder': 'collections', 'subfolder': 'collection-1'}},
+            ),
+        ]
+    )
+    db.commit()
+    db.close()
+
+    list_resp = client.get('/api/v1/markdown-files')
+    assert list_resp.status_code == 200
+    payload = list_resp.json()
+    items_by_path = {item['path']: item for item in payload['items']}
+    assert 'inbox/job-1/job-1.md' in items_by_path
+    assert 'collections/collection-1/job-2/job-2.md' in items_by_path
+
+    entry_one = items_by_path['inbox/job-1/job-1.md']
+    assert entry_one['filename'] == 'job-1.md'
+    assert entry_one['folder'] == 'inbox/job-1'
+    assert entry_one['size_bytes'] == len('# single'.encode('utf-8'))
+    assert 'updated_at' in entry_one
+
+    entry_two = items_by_path['collections/collection-1/job-2/job-2.md']
+    assert entry_two['filename'] == 'job-2.md'
+    assert entry_two['folder'] == 'collections/collection-1/job-2'
+    assert entry_two['size_bytes'] == len('# collection'.encode('utf-8'))
+
+    file_resp = client.get('/api/v1/markdown-files/inbox/job-1/job-1.md')
+    assert file_resp.status_code == 200
+    assert file_resp.text == '# single'
+
+    nested_resp = client.get('/api/v1/markdown-files/collections/collection-1/job-2/job-2.md')
+    assert nested_resp.status_code == 200
+    assert nested_resp.text == '# collection'
+
+
+def test_markdown_browser_ignores_orphan_disk_files(tmp_path):
+    """The filesystem is never consulted: a .md file written directly to
+    results_dir with no backing Job row must not appear in the listing and
+    must not be servable via the content endpoint, even if its path happens
+    to line up with the synthetic layout.
+    """
     from app.core.config import settings
 
     settings.uploads_dir = tmp_path / 'uploads'
     settings.results_dir = tmp_path / 'results'
 
-    result_one = settings.results_dir / 'single' / 'job-1' / 'job-1.md'
-    result_one.parent.mkdir(parents=True, exist_ok=True)
-    result_one.write_text('# single', encoding='utf-8')
-
-    result_two = settings.results_dir / 'collections' / 'collection-1' / 'job-2' / 'job-2.md'
-    result_two.parent.mkdir(parents=True, exist_ok=True)
-    result_two.write_text('# collection', encoding='utf-8')
+    orphan = settings.results_dir / 'inbox' / 'orphan-job' / 'orphan-job.md'
+    orphan.parent.mkdir(parents=True, exist_ok=True)
+    orphan.write_text('# orphan', encoding='utf-8')
 
     list_resp = client.get('/api/v1/markdown-files')
     assert list_resp.status_code == 200
-    payload = list_resp.json()
-    assert len(payload['items']) == 2
-    assert any(item['path'] == 'single/job-1/job-1.md' for item in payload['items'])
-    assert any(item['path'] == 'collections/collection-1/job-2/job-2.md' for item in payload['items'])
+    assert all('orphan-job' not in item['path'] for item in list_resp.json()['items'])
 
-    file_resp = client.get('/api/v1/markdown-files/single/job-1/job-1.md')
-    assert file_resp.status_code == 200
-    assert '# single' in file_resp.text
+    file_resp = client.get('/api/v1/markdown-files/inbox/orphan-job/orphan-job.md')
+    assert file_resp.status_code == 404
 
 
 def test_search_filters_by_name_and_tag(tmp_path):
@@ -361,6 +424,129 @@ def test_save_markdown_creates_new_version(tmp_path):
     saved = db.get(Job, 'job-save')
     assert saved is not None
     assert saved.result_markdown is not None and '# edited' in saved.result_markdown
+    db.close()
+
+
+def test_save_markdown_response_path_is_null_and_no_disk_file_written(tmp_path):
+    """Editor saves no longer write '.v{n}.md' files to disk; the response
+    keeps its 'path' field (backward-compatible shape) but the value is now
+    always null.
+    """
+    from app.core.config import settings
+
+    settings.uploads_dir = tmp_path / 'uploads'
+    settings.results_dir = tmp_path / 'results'
+
+    db = TestingSessionLocal()
+    job = Job(
+        id='job-save-nodisk',
+        original_filename='a.pdf',
+        upload_path=str(tmp_path / 'a.pdf'),
+        upload_content=b'x',
+        upload_mime_type='application/pdf',
+        upload_size_bytes=1,
+        status=JobStatus.FINISHED,
+        result_markdown='---\nsource: "x"\n---\n\n# done',
+        processing_info={},
+    )
+    db.add(job)
+    db.commit()
+    db.close()
+
+    save_resp = client.put(
+        '/api/v1/jobs/job-save-nodisk/save',
+        json={'markdown': '---\nsource: "x"\n---\n\n# edited once'},
+    )
+    assert save_resp.status_code == 200
+    body = save_resp.json()
+    assert body['version'] == 1
+    assert body['path'] is None
+
+    disk_files = [p for p in settings.results_dir.rglob('*.md') if p.is_file()]
+    assert disk_files == []
+
+
+def test_save_markdown_creates_version_row_per_save(tmp_path):
+    db = TestingSessionLocal()
+    job = Job(
+        id='job-save-versions',
+        original_filename='a.pdf',
+        upload_path=str(tmp_path / 'a.pdf'),
+        upload_content=b'x',
+        upload_mime_type='application/pdf',
+        upload_size_bytes=1,
+        status=JobStatus.FINISHED,
+        result_markdown='---\nsource: "x"\n---\n\n# done',
+        processing_info={},
+    )
+    db.add(job)
+    db.commit()
+    db.close()
+
+    first_resp = client.put(
+        '/api/v1/jobs/job-save-versions/save',
+        json={'markdown': '---\nsource: "x"\n---\n\n# first edit'},
+    )
+    assert first_resp.status_code == 200
+    assert first_resp.json()['version'] == 1
+
+    second_resp = client.put(
+        '/api/v1/jobs/job-save-versions/save',
+        json={'markdown': '---\nsource: "x"\n---\n\n# second edit'},
+    )
+    assert second_resp.status_code == 200
+    assert second_resp.json()['version'] == 2
+
+    db = TestingSessionLocal()
+    rows = (
+        db.query(JobMarkdownVersion)
+        .filter(JobMarkdownVersion.job_id == 'job-save-versions')
+        .order_by(JobMarkdownVersion.version)
+        .all()
+    )
+    assert len(rows) == 2
+    assert rows[0].version == 1
+    assert '# first edit' in rows[0].content
+    assert rows[1].version == 2
+    assert '# second edit' in rows[1].content
+
+    saved_job = db.get(Job, 'job-save-versions')
+    assert saved_job is not None
+    assert saved_job.result_markdown is not None and '# second edit' in saved_job.result_markdown
+    db.close()
+
+
+def test_job_markdown_versions_cascade_delete_with_job(tmp_path):
+    db = TestingSessionLocal()
+    job = Job(
+        id='job-save-cascade',
+        original_filename='a.pdf',
+        upload_path=str(tmp_path / 'a.pdf'),
+        upload_content=b'x',
+        upload_mime_type='application/pdf',
+        upload_size_bytes=1,
+        status=JobStatus.FINISHED,
+        result_markdown='---\nsource: "x"\n---\n\n# done',
+        processing_info={},
+    )
+    db.add(job)
+    db.commit()
+    db.close()
+
+    for markdown in ('---\nsource: "x"\n---\n\n# v1', '---\nsource: "x"\n---\n\n# v2'):
+        resp = client.put('/api/v1/jobs/job-save-cascade/save', json={'markdown': markdown})
+        assert resp.status_code == 200
+
+    db = TestingSessionLocal()
+    assert db.query(JobMarkdownVersion).filter(JobMarkdownVersion.job_id == 'job-save-cascade').count() == 2
+    db.close()
+
+    delete_resp = client.delete('/api/v1/jobs/job-save-cascade')
+    assert delete_resp.status_code == 200
+
+    db = TestingSessionLocal()
+    assert db.get(Job, 'job-save-cascade') is None
+    assert db.query(JobMarkdownVersion).filter(JobMarkdownVersion.job_id == 'job-save-cascade').count() == 0
     db.close()
 
 
@@ -570,6 +756,317 @@ def test_download_folder_markdown_zip_recursive_finished_only(tmp_path):
     assert any(name.endswith('report-a-job-a.md') for name in names)
     assert any(name.endswith('report-b-job-b.md') for name in names)
     assert all('job-c' not in name for name in names)
+
+
+def test_download_markdown_serves_from_db_when_disk_missing(tmp_path):
+    from app.core.config import settings
+
+    settings.uploads_dir = tmp_path / 'uploads'
+    settings.results_dir = tmp_path / 'results'
+
+    db = TestingSessionLocal()
+    job = Job(
+        id='job-db-download',
+        original_filename='db-only.pdf',
+        upload_path=str(tmp_path / 'missing-upload.pdf'),
+        result_path=str(tmp_path / 'missing-result.md'),
+        upload_content=b'x',
+        upload_mime_type='application/pdf',
+        upload_size_bytes=1,
+        status=JobStatus.FINISHED,
+        result_markdown='# from database',
+    )
+    db.add(job)
+    db.commit()
+    db.close()
+
+    # Prove there really is no file backing this job on disk.
+    assert not Path(job.result_path).exists()
+
+    response = client.get('/api/v1/jobs/job-db-download/download')
+    assert response.status_code == 200
+    assert response.headers['content-type'].startswith('text/markdown')
+    assert response.headers['content-disposition'] == 'attachment; filename="job-db-download.md"'
+    assert response.text == '# from database'
+
+
+def test_download_markdown_falls_back_to_disk_for_legacy_null_column(tmp_path):
+    from app.core.config import settings
+
+    settings.uploads_dir = tmp_path / 'uploads'
+    settings.results_dir = tmp_path / 'results'
+
+    result_file = tmp_path / 'legacy-result.md'
+    result_file.write_text('# legacy disk content', encoding='utf-8')
+
+    db = TestingSessionLocal()
+    job = Job(
+        id='job-legacy-download',
+        original_filename='legacy.pdf',
+        upload_path=str(tmp_path / 'legacy-upload.pdf'),
+        result_path=str(result_file),
+        upload_content=b'x',
+        upload_mime_type='application/pdf',
+        upload_size_bytes=1,
+        status=JobStatus.FINISHED,
+        result_markdown=None,
+    )
+    db.add(job)
+    db.commit()
+    db.close()
+
+    response = client.get('/api/v1/jobs/job-legacy-download/download')
+    assert response.status_code == 200
+    assert response.text == '# legacy disk content'
+
+
+def test_download_folder_markdown_serves_from_db_when_disk_missing(tmp_path):
+    from app.core.config import settings
+
+    settings.uploads_dir = tmp_path / 'uploads'
+    settings.results_dir = tmp_path / 'results'
+    settings.uploads_dir.mkdir(parents=True, exist_ok=True)
+    settings.results_dir.mkdir(parents=True, exist_ok=True)
+
+    db = TestingSessionLocal()
+    job = Job(
+        id='job-zip-db',
+        original_filename='zip-db.pdf',
+        upload_path=str(tmp_path / 'missing-upload.pdf'),
+        result_path=str(tmp_path / 'missing-result.md'),
+        upload_content=b'x',
+        upload_mime_type='application/pdf',
+        upload_size_bytes=1,
+        status=JobStatus.FINISHED,
+        result_markdown='# zip content from db',
+        processing_info={
+            'settings': {
+                'folder': 'finance',
+                'subfolder': 'db-only',
+                'storage_folder': 'finance/db-only/job-zip-db',
+            }
+        },
+    )
+    db.add(job)
+    db.commit()
+    db.close()
+
+    assert not Path(job.result_path).exists()
+
+    response = client.get('/api/v1/folders/finance/db-only/download')
+    assert response.status_code == 200
+    assert response.headers['content-type'].startswith('application/zip')
+
+    archive = zipfile.ZipFile(io.BytesIO(response.content))
+    names = archive.namelist()
+    assert len(names) == 1
+    assert archive.read(names[0]).decode('utf-8') == '# zip content from db'
+
+
+def test_jobs_pagination_limit_offset(tmp_path):
+    db = TestingSessionLocal()
+    db.query(Job).filter(Job.id.like('page-%')).delete(synchronize_session=False)
+    db.commit()
+    db.add_all(
+        [
+            Job(
+                id=f'page-{i}',
+                original_filename=f'page-{i}.pdf',
+                upload_path=str(tmp_path / f'page-{i}.pdf'),
+                upload_content=b'x',
+                upload_mime_type='application/pdf',
+                upload_size_bytes=1,
+                status=JobStatus.FINISHED,
+            )
+            for i in range(5)
+        ]
+    )
+    db.commit()
+    db.close()
+
+    unbounded_resp = client.get('/api/v1/jobs?q=page-')
+    assert unbounded_resp.status_code == 200
+    assert len(unbounded_resp.json()['items']) == 5
+
+    page_one_resp = client.get('/api/v1/jobs?q=page-&limit=2')
+    assert page_one_resp.status_code == 200
+    page_one_items = page_one_resp.json()['items']
+    assert len(page_one_items) == 2
+
+    page_two_resp = client.get('/api/v1/jobs?q=page-&limit=2&offset=2')
+    assert page_two_resp.status_code == 200
+    page_two_items = page_two_resp.json()['items']
+    assert len(page_two_items) == 2
+
+    page_one_ids = {item['id'] for item in page_one_items}
+    page_two_ids = {item['id'] for item in page_two_items}
+    assert page_one_ids.isdisjoint(page_two_ids)
+
+    assert client.get('/api/v1/jobs?limit=-1').status_code == 422
+    assert client.get('/api/v1/jobs?offset=-1').status_code == 422
+    assert client.get(f'/api/v1/jobs?limit={_JOB_LIST_PAGE_LIMIT_MAX + 1}').status_code == 422
+
+    search_page_resp = client.get('/api/v1/search?q=page-&limit=2')
+    assert search_page_resp.status_code == 200
+    search_page = search_page_resp.json()
+    assert len(search_page['items']) == 2
+    # With pagination active, total must be the full match count, not the page size.
+    assert search_page['total'] == 5
+
+    search_unbounded = client.get('/api/v1/search?q=page-').json()
+    assert len(search_unbounded['items']) == 5
+    assert search_unbounded['total'] == 5
+
+
+def test_list_jobs_defers_blob_columns(tmp_path):
+    """Regression test: GET /jobs (and /search) must not eagerly load the
+    upload_content / result_markdown blob columns for rows it merely lists.
+    """
+    from sqlalchemy import inspect as sa_inspect
+
+    from app.api.routes import _job_query
+
+    db = TestingSessionLocal()
+    db.query(Job).filter(Job.id == 'job-defer-check').delete()
+    db.commit()
+    db.add(
+        Job(
+            id='job-defer-check',
+            original_filename='defer-check.pdf',
+            upload_path=str(tmp_path / 'defer-check.pdf'),
+            upload_content=b'x' * 1000,
+            upload_mime_type='application/pdf',
+            upload_size_bytes=1000,
+            status=JobStatus.FINISHED,
+            result_markdown='# some markdown content',
+        )
+    )
+    db.commit()
+    db.close()
+
+    query_db = TestingSessionLocal()
+    jobs = _job_query(query_db)
+    target = next(job for job in jobs if job.id == 'job-defer-check')
+    unloaded = sa_inspect(target).unloaded
+    assert 'upload_content' in unloaded
+    assert 'result_markdown' in unloaded
+    query_db.close()
+
+
+def test_deferred_blob_column_raises_after_session_close(tmp_path):
+    """Proves the DetachedInstanceError trap is real for this ORM config:
+    a column deferred via query .options() has never been loaded into the
+    instance's __dict__, so touching it after the owning session is closed
+    must fail loudly instead of silently returning None or stale data. Any
+    route that queries with _JOB_BLOB_DEFER_OPTIONS / (defer(upload_content),)
+    and then reads that attribute after its `db` dependency has been torn
+    down would hit exactly this.
+    """
+    from sqlalchemy import select
+    from sqlalchemy.orm.exc import DetachedInstanceError
+
+    from app.api.routes import _JOB_BLOB_DEFER_OPTIONS
+
+    db = TestingSessionLocal()
+    db.query(Job).filter(Job.id == 'job-detached-check').delete()
+    db.commit()
+    db.add(
+        Job(
+            id='job-detached-check',
+            original_filename='detached-check.pdf',
+            upload_path=str(tmp_path / 'detached-check.pdf'),
+            upload_content=b'x' * 1000,
+            upload_mime_type='application/pdf',
+            upload_size_bytes=1000,
+            status=JobStatus.FINISHED,
+            result_markdown='# detached check',
+        )
+    )
+    db.commit()
+    db.close()
+
+    query_db = TestingSessionLocal()
+    job = query_db.scalars(select(Job).where(Job.id == 'job-detached-check').options(*_JOB_BLOB_DEFER_OPTIONS)).one()
+    query_db.close()
+
+    with pytest.raises(DetachedInstanceError):
+        job.result_markdown  # noqa: B018 - intentional attribute access to trigger the lazy load
+
+    with pytest.raises(DetachedInstanceError):
+        job.upload_content  # noqa: B018
+
+
+def test_listing_and_admin_endpoints_survive_populated_blob_columns(monkeypatch, tmp_path):
+    """End-to-end regression: with upload_content and result_markdown both
+    populated (the realistic post-migration shape, not NULL legacy rows),
+    every endpoint that lists/administers jobs via the deferred-blob query
+    options must still return 200 through the full FastAPI dependency
+    lifecycle (session opened by Depends(get_db), closed only after the
+    response body has been serialized). A regression here would surface as
+    a 500 from DetachedInstanceError, not a wrong value.
+    """
+    from app.core.config import settings
+    from app.api import routes
+
+    settings.uploads_dir = tmp_path / 'uploads'
+    settings.results_dir = tmp_path / 'results'
+
+    big_markdown = '# heading\n' + ('lorem ipsum ' * 500)
+    db = TestingSessionLocal()
+    db.query(Job).filter(Job.id == 'job-populated-blobs').delete()
+    db.commit()
+    job = Job(
+        id='job-populated-blobs',
+        original_filename='populated-blobs.pdf',
+        upload_path=str(tmp_path / 'populated-blobs.pdf'),
+        upload_content=b'\x89PNG' * 500,
+        upload_mime_type='application/pdf',
+        upload_size_bytes=2000,
+        status=JobStatus.FINISHED,
+        result_markdown=big_markdown,
+        processing_info={
+            'settings': {'folder': 'blob-check', 'subfolder': '', 'storage_folder': 'blob-check/job-populated-blobs'},
+            'execution': {'page_count': 3},
+        },
+    )
+    db.add(job)
+    db.commit()
+    db.close()
+
+    jobs_resp = client.get('/api/v1/jobs?q=populated-blobs')
+    assert jobs_resp.status_code == 200
+    jobs_items = jobs_resp.json()['items']
+    assert any(item['id'] == 'job-populated-blobs' for item in jobs_items)
+    assert all('result_markdown' not in item and 'upload_content' not in item for item in jobs_items)
+
+    search_resp = client.get('/api/v1/search?q=populated-blobs')
+    assert search_resp.status_code == 200
+    assert any(item['id'] == 'job-populated-blobs' for item in search_resp.json()['items'])
+
+    stats_resp = client.get('/api/v1/stats')
+    assert stats_resp.status_code == 200
+    assert stats_resp.json()['processed_pages'] >= 3
+
+    delayed: list[tuple] = []
+    monkeypatch.setattr(routes.process_job, 'delay', lambda *args: delayed.append(args))
+
+    restart_resp = client.post('/api/v1/folders/blob-check/restart')
+    assert restart_resp.status_code == 200
+    assert restart_resp.json()['restarted_jobs'] == 1
+
+    verify_db = TestingSessionLocal()
+    refreshed = verify_db.get(Job, 'job-populated-blobs')
+    assert refreshed is not None
+    assert refreshed.status == JobStatus.PENDING
+    # _delete_job_outputs clears result_markdown as part of the restart
+    # path; confirm the write-only access on a deferred attribute landed
+    # correctly rather than silently no-op'ing or raising.
+    assert refreshed.result_markdown is None
+    verify_db.close()
+
+    delete_resp = client.delete('/api/v1/folders/blob-check')
+    assert delete_resp.status_code == 200
+    assert delete_resp.json()['deleted_jobs'] == 1
 
 
 def test_update_paddle_settings(monkeypatch):

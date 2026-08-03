@@ -68,6 +68,10 @@ spec:
               value: {{ .Values.backend.corsOrigins | quote }}
             - name: RUN_ALEMBIC_ON_STARTUP
               value: {{ .Values.backend.runAlembicOnStartup | quote }}
+            {{- if .Values.backend.maxUploadBytes }}
+            - name: MAX_UPLOAD_BYTES
+              value: {{ .Values.backend.maxUploadBytes | quote }}
+            {{- end }}
           livenessProbe:
             httpGet:
               path: /api/v1/health

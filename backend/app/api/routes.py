@@ -6,14 +6,14 @@ import shutil
 import zipfile
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Request, UploadFile, status
-from fastapi.responses import FileResponse, PlainTextResponse, StreamingResponse
+from fastapi.responses import FileResponse, PlainTextResponse, Response, StreamingResponse
 from redis import Redis
 from sqlalchemy import func, select, text
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, defer
 
 from app.core.config import settings
 from app.database.session import get_db
-from app.models.models import Job, JobStatus, Tag
+from app.models.models import Job, JobMarkdownVersion, JobStatus, Tag
 from app.schemas.jobs import (
     ContainerState,
     CollectionCreateRequest,
@@ -46,7 +46,7 @@ from app.services.paddle_service import (
     update_paddle_settings,
 )
 from app.services.security import enforce_rate_limit, hash_password, verify_password
-from app.services.storage import build_edited_result_path, build_result_path, save_upload
+from app.services.storage import build_result_path, save_upload
 from app.workers.celery_app import celery_app
 from app.workers.tasks import process_job
 
@@ -54,6 +54,14 @@ router = APIRouter(prefix='/api/v1')
 
 UPLOAD_MODE_VALUES = {'single', 'collection'}
 _COLLECTIONS: dict[str, dict] = {}
+_JOB_LIST_PAGE_LIMIT_MAX = 500
+
+# Job.upload_content and Job.result_markdown are blob-sized columns that most
+# listing/administrative queries never read. Deferring them keeps those
+# queries cheap; call sites that actually need one of the two pass a
+# narrower options tuple instead.
+_JOB_BLOB_DEFER_OPTIONS = (defer(Job.upload_content), defer(Job.result_markdown))
+_JOB_DEFER_UPLOAD_CONTENT_ONLY = (defer(Job.upload_content),)
 _LOWER_PROFILE_RETRY_MAP = {
     'ppocrv6_medium_structurev3': 'ppocrv6_small_structurev3',
     'ppocrv6_small_structurev3': 'ppocrv6_tiny_structurev3',
@@ -108,16 +116,14 @@ def _job_to_response(job: Job) -> JobResponse:
     )
 
 
-def _job_query(
-    db: Session,
+def _apply_job_filters(
+    query,
     q: str | None = None,
     tag: str | None = None,
     from_date: date | None = None,
     to_date: date | None = None,
     status_filter: JobStatus | None = None,
-) -> list[Job]:
-    query = select(Job).order_by(Job.created_at.desc())
-
+):
     if q:
         pattern = f'%{q.strip().lower()}%'
         query = query.where(func.lower(Job.original_filename).like(pattern))
@@ -134,8 +140,48 @@ def _job_query(
     if status_filter:
         query = query.where(Job.status == status_filter)
 
+    return query
+
+
+def _job_query(
+    db: Session,
+    q: str | None = None,
+    tag: str | None = None,
+    from_date: date | None = None,
+    to_date: date | None = None,
+    status_filter: JobStatus | None = None,
+    limit: int | None = None,
+    offset: int | None = None,
+) -> list[Job]:
+    query = _apply_job_filters(
+        select(Job).order_by(Job.created_at.desc()).options(*_JOB_BLOB_DEFER_OPTIONS),
+        q=q, tag=tag, from_date=from_date, to_date=to_date, status_filter=status_filter,
+    )
+
+    # Absent limit/offset (the default) preserves the historical unbounded
+    # behavior so existing frontend callers are unaffected.
+    if offset is not None:
+        query = query.offset(offset)
+    if limit is not None:
+        query = query.limit(limit)
+
     jobs = db.scalars(query).unique().all()
     return jobs
+
+
+def _job_count(
+    db: Session,
+    q: str | None = None,
+    tag: str | None = None,
+    from_date: date | None = None,
+    to_date: date | None = None,
+    status_filter: JobStatus | None = None,
+) -> int:
+    query = _apply_job_filters(
+        select(func.count(Job.id.distinct())),
+        q=q, tag=tag, from_date=from_date, to_date=to_date, status_filter=status_filter,
+    )
+    return db.scalar(query) or 0
 
 
 def _check_job_password(job: Job, password: str | None) -> None:
@@ -234,16 +280,24 @@ def _cleanup_empty_parents(path: Path, stop_dir: Path) -> None:
         current = current.parent
 
 
-def _markdown_entry_from_path(path: Path) -> MarkdownFileEntry:
-    resolved = path.resolve()
-    relative = resolved.relative_to(settings.results_dir.resolve())
-    stat = resolved.stat()
+def _synthetic_markdown_path(job: Job) -> str:
+    """Relative path standing in for the on-disk layout `build_result_path`
+    used to produce (`{folder}/{job_id}/{job_id}.md`), now derived purely
+    from the job row since there is no shared volume to read a real file
+    from.
+    """
+    return f'{_job_folder_path(job)}/{job.id}/{job.id}.md'
+
+
+def _markdown_entry_from_job(job: Job) -> MarkdownFileEntry:
+    path = _synthetic_markdown_path(job)
+    content = job.result_markdown or ''
     return MarkdownFileEntry(
-        path=str(relative).replace('\\', '/'),
-        filename=resolved.name,
-        folder=str(relative.parent).replace('\\', '/') if str(relative.parent) != '.' else '',
-        size_bytes=stat.st_size,
-        updated_at=datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc),
+        path=path,
+        filename=f'{job.id}.md',
+        folder=path.rsplit('/', 1)[0],
+        size_bytes=len(content.encode('utf-8')),
+        updated_at=job.updated_at,
     )
 
 
@@ -595,8 +649,12 @@ def list_jobs(
     from_date: date | None = None,
     to_date: date | None = None,
     status_filter: JobStatus | None = Query(default=None, alias='status'),
+    limit: int | None = Query(default=None, ge=0, le=_JOB_LIST_PAGE_LIMIT_MAX),
+    offset: int | None = Query(default=None, ge=0),
 ) -> JobListResponse:
-    jobs = _job_query(db, q=q, tag=tag, from_date=from_date, to_date=to_date, status_filter=status_filter)
+    jobs = _job_query(
+        db, q=q, tag=tag, from_date=from_date, to_date=to_date, status_filter=status_filter, limit=limit, offset=offset
+    )
     items = [_job_to_response(job) for job in jobs]
 
     # UI normalization: if workers report active process_job IDs, treat any
@@ -618,8 +676,12 @@ def search_documents(
     from_date: date | None = None,
     to_date: date | None = None,
     status_filter: JobStatus | None = Query(default=None, alias='status'),
+    limit: int | None = Query(default=None, ge=0, le=_JOB_LIST_PAGE_LIMIT_MAX),
+    offset: int | None = Query(default=None, ge=0),
 ) -> JobSearchResponse:
-    jobs = _job_query(db, q=q, tag=tag, from_date=from_date, to_date=to_date, status_filter=status_filter)
+    jobs = _job_query(
+        db, q=q, tag=tag, from_date=from_date, to_date=to_date, status_filter=status_filter, limit=limit, offset=offset
+    )
     items = [_job_to_response(job) for job in jobs]
 
     active_job_ids = _active_process_job_ids()
@@ -628,7 +690,13 @@ def search_documents(
             if item.status == JobStatus.RUNNING and item.id not in active_job_ids:
                 item.status = JobStatus.PENDING
 
-    return JobSearchResponse(items=items, total=len(items))
+    # With pagination active, len(items) is only the page size; report the
+    # true match count instead so callers can build pagination UI on it.
+    if limit is not None or offset is not None:
+        total = _job_count(db, q=q, tag=tag, from_date=from_date, to_date=to_date, status_filter=status_filter)
+    else:
+        total = len(items)
+    return JobSearchResponse(items=items, total=total)
 
 
 @router.post('/jobs/restart-pending')
@@ -638,7 +706,10 @@ def restart_pending_jobs(request: Request, db: Session = Depends(get_db)) -> dic
     # Keep truly active RUNNING tasks and only requeue excess RUNNING jobs.
     active_process_jobs = _count_active_process_jobs()
     running_jobs = db.scalars(
-        select(Job).where(Job.status == JobStatus.RUNNING).order_by(Job.updated_at.desc())
+        select(Job)
+        .where(Job.status == JobStatus.RUNNING)
+        .order_by(Job.updated_at.desc())
+        .options(*_JOB_BLOB_DEFER_OPTIONS)
     ).all()
     stuck_running = running_jobs[active_process_jobs:]
 
@@ -657,7 +728,9 @@ def restart_pending_jobs(request: Request, db: Session = Depends(get_db)) -> dic
     if stuck_running:
         db.commit()
 
-    pending_jobs = db.scalars(select(Job).where(Job.status == JobStatus.PENDING)).all()
+    pending_jobs = db.scalars(
+        select(Job).where(Job.status == JobStatus.PENDING).options(*_JOB_BLOB_DEFER_OPTIONS)
+    ).all()
     restarted = 0
     for job in pending_jobs:
         info = job.processing_info if isinstance(job.processing_info, dict) else {}
@@ -797,7 +870,7 @@ def restart_folder(folder_path: str, request: Request, db: Session = Depends(get
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail='Folder path required')
 
     active_job_ids = _active_process_job_ids()
-    jobs = db.scalars(select(Job)).all()
+    jobs = db.scalars(select(Job).options(*_JOB_BLOB_DEFER_OPTIONS)).all()
     folder_jobs = [
         job
         for job in jobs
@@ -841,7 +914,9 @@ def restart_folder(folder_path: str, request: Request, db: Session = Depends(get
 def dashboard_stats(db: Session = Depends(get_db)) -> DashboardStatsResponse:
     processed_documents = db.scalar(select(func.count()).select_from(Job).where(Job.status == JobStatus.FINISHED)) or 0
     failed_documents = db.scalar(select(func.count()).select_from(Job).where(Job.status == JobStatus.FAILED)) or 0
-    finished_jobs = db.scalars(select(Job).where(Job.status == JobStatus.FINISHED)).all()
+    finished_jobs = db.scalars(
+        select(Job).where(Job.status == JobStatus.FINISHED).options(*_JOB_BLOB_DEFER_OPTIONS)
+    ).all()
     processed_pages = 0
     for job in finished_jobs:
         info = job.processing_info if isinstance(job.processing_info, dict) else {}
@@ -862,7 +937,7 @@ def dashboard_stats(db: Session = Depends(get_db)) -> DashboardStatsResponse:
 
 
 @router.get('/jobs/{job_id}/download')
-def download_markdown(job_id: str, password: str | None = None, db: Session = Depends(get_db)) -> FileResponse:
+def download_markdown(job_id: str, password: str | None = None, db: Session = Depends(get_db)) -> Response:
     job = db.get(Job, job_id)
     if job is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail='Job not found')
@@ -871,11 +946,23 @@ def download_markdown(job_id: str, password: str | None = None, db: Session = De
 
     _check_job_password(job, password)
 
+    filename = f'{job_id}.md'
+
+    # DB-first: with no shared volume between backend and worker, the
+    # database is the source of truth. Disk lookup is a legacy fallback for
+    # rows written before result_markdown existed (NULL column).
+    if job.result_markdown is not None:
+        return Response(
+            content=job.result_markdown,
+            media_type='text/markdown',
+            headers={'Content-Disposition': f'attachment; filename="{filename}"'},
+        )
+
     result_path = _resolve_markdown_path(job)
     if not result_path.exists():
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail='Result file not found')
 
-    return FileResponse(result_path, media_type='text/markdown', filename=f'{job_id}.md')
+    return FileResponse(result_path, media_type='text/markdown', filename=filename)
 
 
 @router.get('/jobs/{job_id}/preview')
@@ -896,7 +983,10 @@ def preview_markdown(job_id: str, password: str | None = None, db: Session = Dep
 
 @router.put('/jobs/{job_id}/save', response_model=JobSaveResponse)
 def save_markdown(job_id: str, payload: JobSaveRequest, password: str | None = None, db: Session = Depends(get_db)) -> JobSaveResponse:
-    job = db.get(Job, job_id)
+    # Row lock serializes concurrent saves on the same job so the
+    # max(version)+1 read below cannot race into the (job_id, version)
+    # unique constraint. No-op on SQLite (single writer anyway).
+    job = db.get(Job, job_id, with_for_update=True)
     if job is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail='Job not found')
     if job.status != JobStatus.FINISHED:
@@ -912,18 +1002,28 @@ def save_markdown(job_id: str, payload: JobSaveRequest, password: str | None = N
 
     info = job.processing_info if isinstance(job.processing_info, dict) else {}
     editor = info.get('editor') if isinstance(info.get('editor'), dict) else {}
-    version = int(editor.get('version') or 0) + 1
-    settings_info = info.get('settings') if isinstance(info.get('settings'), dict) else {}
-    storage_folder = settings_info.get('storage_folder') if isinstance(settings_info.get('storage_folder'), str) else None
-    edited_path = build_edited_result_path(storage_folder or job_id, job_id, version)
-    edited_path.write_text(payload.markdown, encoding='utf-8')
+
+    # DB-first: with no shared volume between backend and worker, version
+    # history is truth-sourced from job_markdown_versions rows rather than
+    # from the (possibly stale, e.g. cleared by a job restart) editor
+    # metadata mirrored below. This also sidesteps the (job_id, version)
+    # unique constraint being violated if processing_info ever drifts from
+    # the version rows already on record.
+    highest_version = db.scalar(
+        select(func.max(JobMarkdownVersion.version)).where(JobMarkdownVersion.job_id == job.id)
+    ) or 0
+    version = highest_version + 1
 
     now = datetime.now(timezone.utc)
+    db.add(JobMarkdownVersion(job_id=job.id, version=version, content=payload.markdown, created_at=now))
+
+    # Legacy on-disk '.v{n}.md' files are gone; 'path' keys stay in the JSON
+    # shape for backward compatibility but are now always null.
     versions = list(editor.get('versions')) if isinstance(editor.get('versions'), list) else []
-    versions.append({'version': version, 'path': str(edited_path), 'updated_at': now.isoformat()})
+    versions.append({'version': version, 'path': None, 'updated_at': now.isoformat()})
     info['editor'] = {
         'version': version,
-        'latest_result_path': str(edited_path),
+        'latest_result_path': None,
         'updated_at': now.isoformat(),
         'versions': versions,
     }
@@ -934,7 +1034,7 @@ def save_markdown(job_id: str, payload: JobSaveRequest, password: str | None = N
     return JobSaveResponse(
         job_id=job.id,
         version=version,
-        path=str(edited_path),
+        path=None,
         updated_at=now,
     )
 
@@ -1054,25 +1154,37 @@ def update_paddle_runtime_settings(payload: PaddleSettingsUpdate) -> PaddleSetti
 
 
 @router.get('/markdown-files', response_model=MarkdownBrowserResponse)
-def list_markdown_files() -> MarkdownBrowserResponse:
-    root = settings.results_dir.resolve()
-    entries: list[MarkdownFileEntry] = []
-    if root.exists():
-        for path in sorted(root.rglob('*.md')):
-            if path.is_file():
-                entries.append(_markdown_entry_from_path(path))
+def list_markdown_files(db: Session = Depends(get_db)) -> MarkdownBrowserResponse:
+    # DB-derived: no shared volume between backend and worker, so the
+    # filesystem is never consulted here. Every finished job with markdown
+    # on record is surfaced as a synthetic tree entry; browsing is
+    # JOB/DB-derived so it can later be filtered per authenticated user.
+    jobs = db.scalars(
+        select(Job)
+        .where(Job.status == JobStatus.FINISHED, Job.result_markdown.isnot(None))
+        .options(*_JOB_DEFER_UPLOAD_CONTENT_ONLY)
+    ).all()
+    entries = sorted((_markdown_entry_from_job(job) for job in jobs), key=lambda entry: entry.path)
     return MarkdownBrowserResponse(items=entries)
 
 
 @router.get('/markdown-files/{relative_path:path}')
-def get_markdown_file(relative_path: str) -> PlainTextResponse:
-    root = settings.results_dir.resolve()
-    candidate = (root / relative_path).resolve()
-    if root not in candidate.parents and candidate != root:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail='Invalid markdown path')
-    if not candidate.exists() or not candidate.is_file() or candidate.suffix.lower() != '.md':
+def get_markdown_file(relative_path: str, db: Session = Depends(get_db)) -> PlainTextResponse:
+    if not relative_path.lower().endswith('.md'):
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail='Markdown file not found')
-    return PlainTextResponse(candidate.read_text(encoding='utf-8'))
+
+    # The synthetic layout always names the file after the job id, so the
+    # path stem is a direct, O(1) lookup key rather than a full table scan.
+    job_id = Path(relative_path).stem
+    job = db.get(Job, job_id, options=[defer(Job.upload_content)])
+    if (
+        job is None
+        or job.status != JobStatus.FINISHED
+        or job.result_markdown is None
+        or _synthetic_markdown_path(job) != relative_path
+    ):
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail='Markdown file not found')
+    return PlainTextResponse(job.result_markdown)
 
 
 @router.post('/folders', response_model=FolderActionResponse)
@@ -1102,7 +1214,9 @@ def download_folder_markdown(folder_path: str, db: Session = Depends(get_db)) ->
     if not normalized:
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail='Folder path required')
 
-    jobs = db.scalars(select(Job).where(Job.status == JobStatus.FINISHED)).all()
+    jobs = db.scalars(
+        select(Job).where(Job.status == JobStatus.FINISHED).options(*_JOB_DEFER_UPLOAD_CONTENT_ONLY)
+    ).all()
     folder_jobs = [
         job
         for job in jobs
@@ -1117,17 +1231,25 @@ def download_folder_markdown(folder_path: str, db: Session = Depends(get_db)) ->
         for job in folder_jobs:
             if job.password_hash:
                 continue
+
+            job_folder = _job_folder_path(job)
+            relative_folder = job_folder[len(normalized):].lstrip('/') if job_folder.startswith(normalized) else ''
+            stem = Path(job.original_filename).stem.strip() or job.id
+            archive_name = '/'.join(filter(None, [relative_folder, f'{stem}-{job.id}.md']))
+
+            # DB-first: fall back to disk only for legacy rows with no
+            # result_markdown (written before the column existed).
+            if job.result_markdown is not None:
+                zip_file.writestr(archive_name, job.result_markdown)
+                exported_files += 1
+                continue
+
             try:
                 markdown_path = _resolve_markdown_path(job)
             except HTTPException:
                 continue
             if not markdown_path.exists():
                 continue
-
-            job_folder = _job_folder_path(job)
-            relative_folder = job_folder[len(normalized):].lstrip('/') if job_folder.startswith(normalized) else ''
-            stem = Path(job.original_filename).stem.strip() or job.id
-            archive_name = '/'.join(filter(None, [relative_folder, f'{stem}-{job.id}.md']))
             zip_file.write(markdown_path, arcname=archive_name)
             exported_files += 1
 
@@ -1151,7 +1273,7 @@ def delete_folder(folder_path: str, db: Session = Depends(get_db)) -> FolderActi
     if not normalized:
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail='Folder path required')
 
-    jobs = db.scalars(select(Job)).all()
+    jobs = db.scalars(select(Job).options(*_JOB_BLOB_DEFER_OPTIONS)).all()
     folder_jobs = [
         job
         for job in jobs

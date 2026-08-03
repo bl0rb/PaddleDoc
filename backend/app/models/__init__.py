@@ -1,3 +1,3 @@
-from app.models.models import Base, Chunk, Document, Job, JobStatus
+from app.models.models import Base, Chunk, Document, Job, JobMarkdownVersion, JobStatus
 
-__all__ = ['Base', 'Chunk', 'Document', 'Job', 'JobStatus']
+__all__ = ['Base', 'Chunk', 'Document', 'Job', 'JobMarkdownVersion', 'JobStatus']

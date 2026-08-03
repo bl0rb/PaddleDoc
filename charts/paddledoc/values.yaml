@@ -50,6 +50,11 @@ backend:
     port: 8000
   corsOrigins: '["http://localhost:3000"]'
   runAlembicOnStartup: true
+  # Maximum accepted upload size in bytes. Empty string (default) leaves
+  # MAX_UPLOAD_BYTES unset so the app default (100 MiB) applies. When set,
+  # also raise your ingress controller's body-size limit to match (see the
+  # chart README's "Running without shared storage" section).
+  maxUploadBytes: ""
   resources: {}
   nodeSelector: {}
   tolerations: []
