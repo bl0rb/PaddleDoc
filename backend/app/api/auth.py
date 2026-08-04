@@ -327,7 +327,7 @@ def oidc_authorize(slug: str, request: Request, db: Session = Depends(get_db)) -
     )
 
     redirect_response = RedirectResponse(url=f'{authorization_endpoint}?{query}', status_code=status.HTTP_302_FOUND)
-    state_payload = json.dumps({'slug': slug, 'state': state, 'nonce': nonce, 'code_verifier': code_verifier})
+    state_payload = json.dumps({'state': state, 'nonce': nonce, 'code_verifier': code_verifier})
     redirect_response.set_cookie(
         key=_OIDC_STATE_COOKIE,
         value=sign_value(state_payload),
