@@ -20,24 +20,31 @@ This chart includes a PaddleDoc HA queue profile for production-oriented deploym
 
 ## Quick Start
 
+Since chart 1.1.0 a `SECRET_KEY` is required (see [Authentication](#authentication)) —
+every install/upgrade needs `auth.secretKey.value` or `auth.secretKey.existingSecret`,
+and the value must stay stable across upgrades.
+
 ```bash
-helm upgrade --install PaddleDoc ./charts/paddledoc \
-  --namespace PaddleDoc --create-namespace
+helm upgrade --install paddledoc ./charts/paddledoc \
+  --namespace paddledoc --create-namespace \
+  --set auth.secretKey.value=<openssl rand -hex 32>
 ```
 
 Install from GHCR OCI registry:
 
 ```bash
-helm install PaddleDoc oci://ghcr.io/bl0rb/charts/paddledoc --version 0.2.0 \
-  --namespace PaddleDoc --create-namespace
+helm install paddledoc oci://ghcr.io/bl0rb/charts/paddledoc --version 1.1.0 \
+  --namespace paddledoc --create-namespace \
+  --set auth.secretKey.value=<openssl rand -hex 32>
 ```
 
 ## Production-like Example
 
 ```bash
-helm upgrade --install PaddleDoc ./charts/paddledoc \
-  --namespace PaddleDoc --create-namespace \
-  -f ./charts/paddledoc/examples/paddledoc-ha-queue-oss.yaml
+helm upgrade --install paddledoc ./charts/paddledoc \
+  --namespace paddledoc --create-namespace \
+  -f ./charts/paddledoc/examples/paddledoc-ha-queue-oss.yaml \
+  --set auth.secretKey.existingSecret=paddledoc-auth
 ```
 
 ## Small Kubernetes Example (CPU + External PostgreSQL)
@@ -49,9 +56,10 @@ Keep one replica per component, use conservative resources, and default to a
 CPU OCR profile.
 
 ```bash
-helm upgrade --install PaddleDoc ./charts/paddledoc \
-  --namespace PaddleDoc --create-namespace \
-  -f ./charts/paddledoc/examples/nas-cpu-external-postgres.yaml
+helm upgrade --install paddledoc ./charts/paddledoc \
+  --namespace paddledoc --create-namespace \
+  -f ./charts/paddledoc/examples/nas-cpu-external-postgres.yaml \
+  --set auth.secretKey.value=<openssl rand -hex 32>
 ```
 
 ## Important Notes

@@ -33,7 +33,7 @@ Use prebuilt GHCR images and persistent local folders.
 docker compose -f docker-compose.nas.yml up -d
 ```
 
-Before first production run, set strong credentials/environment values:
+Before first production run, set strong credentials/environment values (e.g. in a `.env` file next to the compose file — see `.env.example`):
 
 ```bash
 POSTGRES_USER=paddledoc
@@ -41,12 +41,20 @@ POSTGRES_PASSWORD=change-this
 POSTGRES_DB=paddledoc
 PADDLEDOC_TAG=latest
 PADDLEDOC_PUBLIC_API_URL=http://NAS_IP:8000
+
+# Since v1.1.0 (authentication):
+SECRET_KEY=generate-with-openssl-rand-hex-32   # signs sessions, encrypts stored OIDC secrets — set once, never change
+REDIS_PASSWORD=change-this-too
+PUBLIC_API_URL=http://NAS_IP:8000              # backend URL used for OIDC redirect URIs
+CORS_ORIGINS=["http://NAS_IP:3000"]            # your frontend origin(s); no wildcard — cookies are credentialed
 ```
 
 Endpoints:
 
 - Frontend: `http://NAS_IP:3000`
 - Backend: `http://NAS_IP:8000`
+
+First run: open `http://NAS_IP:3000/setup` and create the initial admin account. Everything else requires a login from then on.
 
 ### Docker (Local Build)
 
@@ -71,11 +79,12 @@ helm upgrade --install PaddleDoc ./charts/paddledoc \
 Install from GHCR OCI chart:
 
 ```bash
-helm install PaddleDoc oci://ghcr.io/bl0rb/charts/paddledoc --version 0.2.0 \
-  --namespace PaddleDoc --create-namespace
+helm install paddledoc oci://ghcr.io/bl0rb/charts/paddledoc --version 1.1.0 \
+  --namespace paddledoc --create-namespace \
+  --set auth.secretKey.value=$(openssl rand -hex 32)
 ```
 
-More chart options and examples are in [charts/paddledoc/README.md](charts/paddledoc/README.md).
+Since chart 1.1.0 a `SECRET_KEY` is required — the chart refuses to render without `auth.secretKey.value` or `auth.secretKey.existingSecret` (prefer the latter in real deployments, e.g. provisioned via External Secrets Operator). More chart options and examples are in [charts/paddledoc/README.md](charts/paddledoc/README.md).
 
 ## Core Features
 
@@ -88,6 +97,19 @@ More chart options and examples are in [charts/paddledoc/README.md](charts/paddl
 - Versioned markdown editing on job detail page
 - Password-gated view/download/edit/delete per job
 - OpenAI-compatible page-by-page vision profile
+- User accounts with per-user/team data visibility, local login and OIDC SSO (Keycloak, Microsoft Entra ID)
+- Admin console for users, teams, and identity providers — SSO is configured at runtime, no redeploy
+
+## Authentication
+
+Since v1.1.0 every page and API endpoint requires a login.
+
+- **First run**: `/setup` creates the initial admin account (only available while no user exists).
+- **Local login**: username/email + password at `/login`. Login is rate-limited and gives no hint whether an account exists.
+- **SSO (OIDC)**: admins add Keycloak or Microsoft Entra ID under `/admin` → Identity Providers (issuer URL, client ID/secret), test the connection, and enable the provider — it then appears as a login button. Client secrets are stored encrypted (derived from `SECRET_KEY`) and are write-only in the UI. New SSO logins get their own fresh account; linking an SSO identity to an existing account is an explicit admin action, never automatic.
+- **Visibility**: users see only their own jobs; members of a team see all of the team's jobs. Jobs created before v1.1.0 have no owner and are admin-only until an admin assigns them (`/admin` → Users → "Assign ownerless jobs").
+- **Sessions**: httpOnly cookie, server-side in the database — 7-day sliding expiry, 30-day cap.
+- **Operational requirements**: `SECRET_KEY` (mandatory, set once and never change it — rotating it invalidates all sessions and makes stored OIDC client secrets unreadable), `PUBLIC_API_URL` (external backend URL, used to build OIDC redirect URIs), `REDIS_PASSWORD`, and concrete `CORS_ORIGINS` (no wildcard).
 
 ## OCR Profiles
 
@@ -132,10 +154,31 @@ Browse all jobs, filter by folder/tags/date/filename, and open detailed results.
 
 Review metadata and processing info, preview or edit markdown, and download output.
 
+### Setup & Login (`/setup`, `/login`)
+
+First run bootstraps the initial admin at `/setup`; afterwards `/login` offers local sign-in plus one button per enabled OIDC provider.
+
+### Admin Console (`/admin`)
+
+Admins manage users (roles, teams, activation, password resets, assigning legacy ownerless jobs), teams, and OIDC identity providers — including a per-provider connection test.
+
 ## API Quickstart
+
+All `/api/v1` endpoints (except `/health` and the auth endpoints themselves) require a session. Log in once and reuse the cookie:
+
+```bash
+# Log in and store the session cookie
+curl -c cookies.txt -H "Content-Type: application/json" \
+  -d '{"identifier": "admin", "password": "your-password"}' \
+  http://localhost:8000/api/v1/auth/login
+
+# Use it on every subsequent call
+curl -b cookies.txt http://localhost:8000/api/v1/jobs
+```
 
 Common endpoints:
 
+- `POST /api/v1/auth/login` / `POST /api/v1/auth/logout` / `GET /api/v1/auth/me`
 - `POST /api/v1/upload`
 - `GET /api/v1/jobs`
 - `GET /api/v1/jobs/{job_id}`
@@ -153,7 +196,7 @@ Common endpoints:
 Upload using the OpenAI-compatible vision profile:
 
 ```bash
-curl -F "file=@invoice.pdf" -F "profile_id=openai_vision" http://localhost:8000/api/v1/upload
+curl -b cookies.txt -F "file=@invoice.pdf" -F "profile_id=openai_vision" http://localhost:8000/api/v1/upload
 ```
 
 ## n8n Integration
@@ -176,6 +219,8 @@ n8n URL choice:
 
 - n8n inside Docker with PaddleDoc: `http://backend:8000`
 - n8n on host machine: `http://localhost:8000`
+
+Since v1.1.0 the API requires a session: create a dedicated PaddleDoc user for n8n, add one HTTP Request node that POSTs `{"identifier": ..., "password": ...}` to `/api/v1/auth/login` at the start of the workflow, and forward the returned `paddledoc_session` cookie to every subsequent node (enable "Include Response Headers and Status" on the login node, or use a shared cookie jar). Sessions last 7 days on a sliding window, so logging in once per workflow run is the simplest robust pattern.
 
 ## Deployment and Runtime Notes
 
