@@ -156,6 +156,88 @@ This volume is independent of `persistence.enabled` (which controls the
 shared `/app/backend/storage` PVC) — it is added whenever
 `worker.modelCache.enabled` is `true`, regardless of the persistence setting.
 
+### Redis authentication
+
+Redis is both the Celery broker/result backend and reachable from every
+backend/worker pod, so it should not sit open on the network. Wiring is
+optional/back-compatible:
+
+- **Bundled redis** (`redis.enabled=true`, the default): `redis.auth.enabled`
+  defaults to `true`. The chart generates a password into a
+  `<release>-redis-auth` Secret the first time it's installed (preserved
+  across upgrades via `lookup`, so an upgrade doesn't rotate the password and
+  break existing broker connections), passes it to the bundled redis
+  container as `--requirepass`, and wires the same value into backend/worker/
+  the migration job's `REDIS_URL` via a `REDIS_PASSWORD` env + Kubernetes
+  `$(REDIS_PASSWORD)` substitution (the same pattern already used for
+  `DATABASE_URL`/`DATABASE_PASSWORD`) — so the password itself is never
+  duplicated as a literal string anywhere in the rendered manifests.
+- **External redis** (`redis.enabled=false`): auth stays off by default
+  (identical unauthenticated `REDIS_URL` to before this chart supported
+  auth) unless you explicitly opt in by setting `redis.auth.password` or
+  `redis.auth.existingSecret`.
+- `redis.auth.existingSecret` points at a secret you manage yourself
+  (key `redis.auth.existingSecretKey`, default `password`). It must already
+  exist before `helm install`/`upgrade` — its value is read via `lookup`,
+  which can't see a secret created earlier in the same install.
+- `redis.auth.password` is a plaintext override (mainly for local/CI use);
+  it takes priority over both `existingSecret` and auto-generation.
+
+To disable auth entirely (e.g. a trusted, network-isolated redis), set
+`redis.auth.enabled=false`.
+
+### Authentication
+
+Every UI/API action requires login (there is no anonymous or job-password-only
+access path). Wiring:
+
+- **`auth.required`** (default `true`): the chart fails `helm template`/
+  `install`/`upgrade` immediately with a clear message if no `SECRET_KEY` is
+  configured, rather than deploying pods that crash-loop at startup. Set
+  `auth.secretKey.existingSecret` (name + `existingSecretKey` of a
+  pre-existing Secret you manage) or `auth.secretKey.value` (plaintext,
+  local/CI use — the chart then creates and manages a `<release>-auth`
+  Secret from it; prefer `existingSecret` for real deployments so the key
+  doesn't live in plaintext values/Helm release history). Unlike the bundled
+  redis password, `SECRET_KEY` is **never auto-generated** — it must be
+  supplied explicitly, since a value that silently changed between renders
+  would invalidate every session and break decryption of stored OIDC client
+  secrets. `SECRET_KEY` is wired into `backend`, `worker` (parity — it
+  imports the same config module), and the migration Job (`alembic/env.py`
+  also imports it). Set `auth.required=false` only for trusted,
+  non-production use; the app itself still fails fast at its own startup for
+  any non-sqlite database if `SECRET_KEY` ends up unset.
+- **`auth.publicApiUrl`**: base URL the backend is externally reachable at,
+  used to build the OIDC `redirect_uri`
+  (`{publicApiUrl}/api/v1/auth/oidc/{slug}/callback`). Defaults to a URL
+  derived from `ingress.backend.hosts[0]` (`https://` if `ingress.backend.tls`
+  is set, else `http://`) when `ingress.backend.enabled=true`, otherwise
+  `http://localhost:<backend.service.port>`. Set it explicitly if your
+  externally visible hostname differs from the ingress host configured here
+  (e.g. a separate DNS/load-balancer front-end), or OIDC login redirects will
+  target the wrong host.
+- **First run**: visit `/setup` on the frontend to bootstrap the first admin
+  account. `GET /auth/setup-status` reports whether setup is still needed;
+  `POST /auth/setup` is allowed exactly once and permanently rejects further
+  attempts once an admin exists.
+- **Upgrading an existing install**: after upgrading to an auth-enabled
+  version, every previously existing job has no owner and is visible to
+  admins only until an admin explicitly bulk-assigns ownership
+  (`POST /auth/admin/jobs/claim-ownerless`); regular users won't see legacy
+  jobs until then.
+
+### Celery task time limits
+
+`worker.celery.taskSoftTimeLimitSeconds` / `worker.celery.taskTimeLimitSeconds`
+(defaults 1500s/1800s) bound how long a single OCR task may run before Celery
+raises `SoftTimeLimitExceeded` inside it (soft) or SIGKILLs the worker child
+(hard) — the job is then marked `FAILED` rather than hanging a worker slot
+indefinitely. `worker.celery.visibilityTimeoutSeconds` (default 1800s) is the
+matching Redis broker `visibility_timeout`; it must stay `>=` the hard limit
+so a still-running long task isn't considered lost and redelivered to another
+worker before its own hard limit fires (`app/workers/celery_app.py` also
+clamps this defensively even if misconfigured here).
+
 ## Database Configuration (External Only)
 
 This chart uses an external-database pattern and supports only external PostgreSQL:
@@ -244,6 +326,14 @@ The following list contains all configurable parameters currently supported by t
 | `worker.containerSecurityContext` | map | `{allowPrivilegeEscalation: false, capabilities: {drop: [ALL]}}` |
 | `worker.modelCache.enabled` | bool | `true` |
 | `worker.modelCache.sizeLimit` | string | `""` |
+| `worker.celery.taskSoftTimeLimitSeconds` | int | `1500` |
+| `worker.celery.taskTimeLimitSeconds` | int | `1800` |
+| `worker.celery.visibilityTimeoutSeconds` | int | `1800` |
+| `auth.required` | bool | `true` |
+| `auth.secretKey.existingSecret` | string | `""` |
+| `auth.secretKey.existingSecretKey` | string | `secret-key` |
+| `auth.secretKey.value` | string | `""` |
+| `auth.publicApiUrl` | string | `""` |
 | `migrationJob.enabled` | bool | `false` |
 | `migrationJob.backoffLimit` | int | `2` |
 | `migrationJob.podSecurityContext` | map | `{runAsNonRoot: true, runAsUser: 1000, runAsGroup: 1000, fsGroup: 1000, fsGroupChangePolicy: OnRootMismatch, seccompProfile: {type: RuntimeDefault}}` |
@@ -268,6 +358,10 @@ The following list contains all configurable parameters currently supported by t
 | `redis.image.pullPolicy` | string | `IfNotPresent` |
 | `redis.host` | string | `""` |
 | `redis.port` | int | `6379` |
+| `redis.auth.enabled` | bool | `true` |
+| `redis.auth.existingSecret` | string | `""` |
+| `redis.auth.existingSecretKey` | string | `password` |
+| `redis.auth.password` | string | `""` |
 | `redis.resources` | map | `{}` |
 | `redis.podSecurityContext` | map | `{runAsNonRoot: true, runAsUser: 999, runAsGroup: 999, seccompProfile: {type: RuntimeDefault}}` |
 | `redis.containerSecurityContext` | map | `{allowPrivilegeEscalation: false, capabilities: {drop: [ALL]}}` |

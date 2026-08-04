@@ -2,6 +2,7 @@
 {{- if not .Values.database.useExternal }}
 {{- fail "database.useExternal must be true. This chart supports only external PostgreSQL." }}
 {{- end }}
+{{- include "paddledoc.requireSecretKey" . }}
 apiVersion: batch/v1
 kind: Job
 metadata:
@@ -50,9 +51,23 @@ spec:
               value: postgresql+psycopg://{{ required "database.user is required" .Values.database.user }}:$(DATABASE_PASSWORD)@{{ required "database.host is required" .Values.database.host }}:{{ .Values.database.port }}/{{ required "database.database is required" .Values.database.database }}
             - name: DATABASE_SCHEMA
               value: {{ .Values.database.schema | quote }}
-            - name: REDIS_URL
+            {{- if include "paddledoc.secretKeyEffective" . }}
+            # alembic/env.py imports app/core/config.py, which fails fast at
+            # import time if SECRET_KEY is unset for a non-sqlite database --
+            # required here even though this job never signs anything itself.
+            - name: SECRET_KEY
               valueFrom:
                 secretKeyRef:
-                  name: {{ include "paddledoc.fullname" . }}-env
-                  key: REDIS_URL
+                  name: {{ include "paddledoc.secretKeySecretName" . }}
+                  key: {{ include "paddledoc.secretKeySecretKey" . }}
+            {{- end }}
+            {{- if include "paddledoc.redisAuthEffective" . }}
+            - name: REDIS_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "paddledoc.redisAuthSecretName" . }}
+                  key: {{ include "paddledoc.redisAuthSecretKey" . }}
+            {{- end }}
+            - name: REDIS_URL
+              value: {{ include "paddledoc.redisUrl" . | quote }}
 {{- end }}

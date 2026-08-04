@@ -2,6 +2,7 @@
 {{- if not .Values.database.useExternal }}
 {{- fail "database.useExternal must be true. This chart supports only external PostgreSQL." }}
 {{- end }}
+{{- include "paddledoc.requireSecretKey" . }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -55,17 +56,39 @@ spec:
               value: postgresql+psycopg://{{ required "database.user is required" .Values.database.user }}:$(DATABASE_PASSWORD)@{{ required "database.host is required" .Values.database.host }}:{{ .Values.database.port }}/{{ required "database.database is required" .Values.database.database }}
             - name: DATABASE_SCHEMA
               value: {{ .Values.database.schema | quote }}
-            - name: REDIS_URL
+            {{- if include "paddledoc.secretKeyEffective" . }}
+            # The worker imports app/core/config.py (directly, and via
+            # alembic/env.py if it ever ran migrations) same as the backend,
+            # which fails fast at import time if SECRET_KEY is unset for a
+            # non-sqlite database -- set here for parity even though the
+            # worker itself doesn't sign anything today.
+            - name: SECRET_KEY
               valueFrom:
                 secretKeyRef:
-                  name: {{ include "paddledoc.fullname" . }}-env
-                  key: REDIS_URL
+                  name: {{ include "paddledoc.secretKeySecretName" . }}
+                  key: {{ include "paddledoc.secretKeySecretKey" . }}
+            {{- end }}
+            {{- if include "paddledoc.redisAuthEffective" . }}
+            - name: REDIS_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "paddledoc.redisAuthSecretName" . }}
+                  key: {{ include "paddledoc.redisAuthSecretKey" . }}
+            {{- end }}
+            - name: REDIS_URL
+              value: {{ include "paddledoc.redisUrl" . | quote }}
             - name: PADDLE_DEFAULT_PROFILE
               value: {{ .Values.worker.paddleDefaultProfile | quote }}
             {{- if .Values.worker.modelCache.enabled }}
             - name: HOME
               value: /home/paddledoc
             {{- end }}
+            - name: CELERY_TASK_SOFT_TIME_LIMIT_SECONDS
+              value: {{ .Values.worker.celery.taskSoftTimeLimitSeconds | quote }}
+            - name: CELERY_TASK_TIME_LIMIT_SECONDS
+              value: {{ .Values.worker.celery.taskTimeLimitSeconds | quote }}
+            - name: CELERY_BROKER_VISIBILITY_TIMEOUT_SECONDS
+              value: {{ .Values.worker.celery.visibilityTimeoutSeconds | quote }}
           resources:
             {{- toYaml .Values.worker.resources | nindent 12 }}
           volumeMounts:

@@ -2,6 +2,7 @@
 {{- if not .Values.database.useExternal }}
 {{- fail "database.useExternal must be true. This chart supports only external PostgreSQL." }}
 {{- end }}
+{{- include "paddledoc.requireSecretKey" . }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -59,13 +60,30 @@ spec:
               value: postgresql+psycopg://{{ required "database.user is required" .Values.database.user }}:$(DATABASE_PASSWORD)@{{ required "database.host is required" .Values.database.host }}:{{ .Values.database.port }}/{{ required "database.database is required" .Values.database.database }}
             - name: DATABASE_SCHEMA
               value: {{ .Values.database.schema | quote }}
-            - name: REDIS_URL
+            {{- if include "paddledoc.redisAuthEffective" . }}
+            - name: REDIS_PASSWORD
               valueFrom:
                 secretKeyRef:
-                  name: {{ include "paddledoc.fullname" . }}-env
-                  key: REDIS_URL
+                  name: {{ include "paddledoc.redisAuthSecretName" . }}
+                  key: {{ include "paddledoc.redisAuthSecretKey" . }}
+            {{- end }}
+            - name: REDIS_URL
+              value: {{ include "paddledoc.redisUrl" . | quote }}
             - name: CORS_ORIGINS
               value: {{ .Values.backend.corsOrigins | quote }}
+            - name: TRUSTED_PROXY_IPS
+              value: {{ .Values.backend.trustedProxyIps | quote }}
+            - name: TRUSTED_PROXY_HOPS
+              value: {{ .Values.backend.trustedProxyHops | quote }}
+            {{- if include "paddledoc.secretKeyEffective" . }}
+            - name: SECRET_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "paddledoc.secretKeySecretName" . }}
+                  key: {{ include "paddledoc.secretKeySecretKey" . }}
+            {{- end }}
+            - name: PUBLIC_API_URL
+              value: {{ include "paddledoc.publicApiUrl" . | quote }}
             - name: RUN_ALEMBIC_ON_STARTUP
               value: {{ .Values.backend.runAlembicOnStartup | quote }}
             {{- if .Values.backend.maxUploadBytes }}

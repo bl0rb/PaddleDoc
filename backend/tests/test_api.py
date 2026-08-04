@@ -4,34 +4,33 @@ from pathlib import Path
 
 import pytest
 from fastapi import HTTPException, UploadFile
-from fastapi.testclient import TestClient
-from sqlalchemy import create_engine
-from sqlalchemy.orm import sessionmaker
 
+from app.api.deps import get_current_user
 from app.api.routes import _JOB_LIST_PAGE_LIMIT_MAX
-from app.database.session import get_db
 from app.main import app
-from app.models.models import Base, Job, JobMarkdownVersion, JobStatus
+from app.models.models import Collection, Job, JobMarkdownVersion, JobStatus, User, UserRole
+from conftest import TestingSessionLocal, client
 
-TEST_DB = 'sqlite:///./test.db'
-engine = create_engine(TEST_DB, future=True)
-TestingSessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False, expire_on_commit=False)
+# These tests predate the Step 2 auth work and exercise business logic that
+# doesn't care about *who* is calling -- Step 3 is what adds per-row
+# visibility scoping on top of the plain "is there a session" gate added in
+# Step 2. Bypass the gate here with a fixed admin identity rather than
+# threading a real login through every one of these tests; test_auth_api.py
+# is what actually exercises the cookie/session machinery.
+_TEST_ADMIN_USER = User(
+    id='test-admin-bypass',
+    username='test-admin-bypass',
+    email='test-admin-bypass@example.com',
+    role=UserRole.ADMIN,
+    is_active=True,
+)
 
 
-Base.metadata.drop_all(bind=engine)
-Base.metadata.create_all(bind=engine)
-
-
-def override_get_db():
-    db = TestingSessionLocal()
-    try:
-        yield db
-    finally:
-        db.close()
-
-
-app.dependency_overrides[get_db] = override_get_db
-client = TestClient(app)
+@pytest.fixture(autouse=True)
+def _bypass_auth():
+    app.dependency_overrides[get_current_user] = lambda: _TEST_ADMIN_USER
+    yield
+    app.dependency_overrides.pop(get_current_user, None)
 
 
 def test_healthcheck():
@@ -193,6 +192,50 @@ def test_collection_flow(monkeypatch, tmp_path):
     assert delayed[0]['mode'] == 'collection'
     assert delayed[0]['email'] == ''
     assert delayed[0]['department'] == ''
+
+
+def test_collection_persists_in_db_across_sessions(tmp_path):
+    """Step 4 ride-along: collections used to live in an in-memory
+    `_COLLECTIONS` dict in app/api/routes.py, which meant a second replica
+    (or a restart) could never see a collection created on another pod. They
+    are now a real `collections` table row, so a brand new SQLAlchemy
+    session -- standing in here for "a different backend replica" -- must
+    see exactly what was written, independent of the session/identity map
+    that created it.
+    """
+    from app.core.config import settings
+
+    settings.uploads_dir = tmp_path / 'uploads'
+    settings.results_dir = tmp_path / 'results'
+
+    create_resp = client.post(
+        '/api/v1/collections',
+        json={'email': 'ops@example.com', 'department': 'finance', 'folder': 'audits', 'subfolder': '2026-q1'},
+    )
+    assert create_resp.status_code == 200
+    collection_id = create_resp.json()['collection_id']
+
+    # A fresh session with nothing in its identity map -- if this were still
+    # the old in-memory dict, a different process wouldn't have it at all;
+    # here it must be a durable row read straight from the DB.
+    fresh_session = TestingSessionLocal()
+    try:
+        row = fresh_session.get(Collection, collection_id)
+        assert row is not None
+        assert row.email == 'ops@example.com'
+        assert row.department == 'finance'
+        assert row.folder == 'audits'
+        assert row.subfolder == '2026-q1'
+        assert row.owner_id == _TEST_ADMIN_USER.id
+    finally:
+        fresh_session.close()
+
+    # And the API itself, which pulls a brand new session per-request via
+    # get_db (see conftest.override_get_db), still resolves it too.
+    get_resp = client.get(f'/api/v1/collections/{collection_id}')
+    assert get_resp.status_code == 200
+    assert get_resp.json()['collection_id'] == collection_id
+    assert get_resp.json()['job_ids'] == []
 
 
 def test_markdown_browser_lists_files(tmp_path):
@@ -945,7 +988,7 @@ def test_list_jobs_defers_blob_columns(tmp_path):
     db.close()
 
     query_db = TestingSessionLocal()
-    jobs = _job_query(query_db)
+    jobs = _job_query(query_db, _TEST_ADMIN_USER)
     target = next(job for job in jobs if job.id == 'job-defer-check')
     unloaded = sa_inspect(target).unloaded
     assert 'upload_content' in unloaded

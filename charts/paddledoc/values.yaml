@@ -49,6 +49,19 @@ backend:
     type: ClusterIP
     port: 8000
   corsOrigins: '["http://localhost:3000"]'
+  # X-Forwarded-For/X-Real-IP are only trusted (to key the rate limiter) when
+  # the backend's direct TCP peer matches one of these IPs/CIDRs -- e.g. your
+  # cluster's pod CIDR (so the in-cluster ingress-controller/LB pod that
+  # proxies requests is trusted) or an internal NLB/ALB range. Empty
+  # (default) means the headers are never trusted and the limiter keys off
+  # the direct TCP peer instead -- safe against spoofing, but shares one
+  # bucket across every client behind that peer until this is set for your
+  # cluster/ingress. JSON array string, same convention as corsOrigins.
+  trustedProxyIps: '[]'
+  # How many trusted-proxy hops are expected to have appended to
+  # X-Forwarded-For (1 = a single ingress-controller/ALB in front of the
+  # pod). Only relevant once trustedProxyIps is non-empty.
+  trustedProxyHops: 1
   runAlembicOnStartup: true
   # Maximum accepted upload size in bytes. Empty string (default) leaves
   # MAX_UPLOAD_BYTES unset so the app default (100 MiB) applies. When set,
@@ -80,6 +93,14 @@ worker:
     tag: "latest"
     pullPolicy: IfNotPresent
   paddleDefaultProfile: ppocrv6_tiny
+  # Celery task time limits + matching broker visibility_timeout -- see the
+  # comments on the matching settings in app/core/config.py. visibilityTimeoutSeconds
+  # must stay >= taskTimeLimitSeconds (celery_app.py also clamps this
+  # defensively even if misconfigured here).
+  celery:
+    taskSoftTimeLimitSeconds: 1500
+    taskTimeLimitSeconds: 1800
+    visibilityTimeoutSeconds: 1800
   resources: {}
   nodeSelector: {}
   tolerations: []
@@ -104,6 +125,40 @@ worker:
     # Maximum size of the emptyDir model cache (e.g. "10Gi"). Empty string
     # means unlimited (no sizeLimit is rendered on the emptyDir).
     sizeLimit: ""
+
+auth:
+  # SECRET_KEY signs session cookies and the OIDC state cookie, and derives
+  # the key used to encrypt stored OIDC provider client secrets. Required by
+  # the app itself for any non-sqlite (i.e. any real, external-PostgreSQL)
+  # deployment -- this chart only ever deploys against external PostgreSQL,
+  # so in practice it is always required. required=true (the default) makes
+  # the chart fail template/install immediately with a clear message instead
+  # of deploying pods that crash-loop at startup; set required=false only for
+  # trusted, non-production use (the app still fails fast at its own startup
+  # if SECRET_KEY ends up unset).
+  required: true
+  secretKey:
+    # Name of a pre-existing Secret holding SECRET_KEY. Must already exist
+    # before `helm install`/`upgrade`. Takes priority over `value` below.
+    existingSecret: ""
+    existingSecretKey: secret-key
+    # Plaintext value, mainly for local/CI use. When set (and existingSecret
+    # is empty) the chart creates and manages a "<release>-auth" Secret from
+    # it. Prefer existingSecret in real deployments so SECRET_KEY doesn't
+    # live in plaintext values/Helm release history. Unlike redis.auth.password,
+    # this is never auto-generated -- an operator must supply it explicitly,
+    # since a value that silently changed between renders would invalidate
+    # every session and break OIDC client-secret decryption.
+    value: ""
+  # Base URL the backend is publicly/externally reachable at; used to build
+  # the OIDC redirect_uri (`{publicApiUrl}/api/v1/auth/oidc/{slug}/callback`).
+  # Empty string (default) derives it from ingress.backend.hosts[0] (https if
+  # ingress.backend.tls is set, else http) when ingress.backend.enabled=true,
+  # else falls back to http://localhost:<backend.service.port>. Set this
+  # explicitly if your externally visible hostname differs from the ingress
+  # host configured here (e.g. a separate DNS/load-balancer front-end), or
+  # OIDC login redirects will target the wrong host.
+  publicApiUrl: ""
 
 migrationJob:
   enabled: false
@@ -151,6 +206,29 @@ redis:
     pullPolicy: IfNotPresent
   host: ""
   port: 6379
+  # Redis is both the Celery broker/result backend and (via the paddledoc
+  # OIDC-discovery fetcher's SSRF surface) reachable from backend/worker
+  # pods, so it should not sit open on the network. Optional/back-compatible:
+  # - redis.enabled=true (bundled redis, the default): auth is on by default
+  #   and a password is auto-generated into "<release>-redis-auth" the first
+  #   time it's installed (preserved across upgrades).
+  # - redis.enabled=false (external redis): auth stays off by default (same
+  #   unauthenticated REDIS_URL as before) unless you explicitly set
+  #   auth.password or auth.existingSecret below.
+  auth:
+    enabled: true
+    # Name of a pre-existing secret holding the redis password. Must already
+    # exist before `helm install`/`upgrade` (its value is read via `lookup`,
+    # which only sees resources already applied to the cluster -- it cannot
+    # see a Secret created earlier in the same install). Leave empty to have
+    # the chart generate and manage "<release>-redis-auth" itself.
+    existingSecret: ""
+    existingSecretKey: password
+    # Plaintext password, mainly for local/CI use. Takes priority over both
+    # existingSecret and auto-generation when set. Prefer existingSecret (or
+    # leaving both empty for auto-generation) in real deployments so the
+    # password doesn't live in plaintext values/Helm release history.
+    password: ""
   resources: {}
   podSecurityContext:
     runAsNonRoot: true

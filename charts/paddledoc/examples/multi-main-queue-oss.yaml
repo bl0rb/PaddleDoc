@@ -37,6 +37,10 @@ redis:
   enabled: false
   host: your-redis-host.example.com
   port: 6379
+  # auth stays off by default for external redis (back-compatible). To turn
+  # it on, set redis.auth.password, or point redis.auth.existingSecret at a
+  # secret (key "password") you manage separately -- see the chart README's
+  # "Redis authentication" section.
 
 frontend:
   enabled: true

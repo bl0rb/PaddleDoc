@@ -18,7 +18,10 @@ services:
     image: redis:7
     restart: always
     container_name: paddledoc_redis
-    command: ["redis-server", "--save", "60", "1", "--loglevel", "warning"]
+    # requirepass keeps Redis (Celery broker + result backend) from sitting
+    # open on the compose network. Override REDIS_PASSWORD in a .env file for
+    # anything beyond NAS dev; backend/worker REDIS_URL below must match.
+    command: ["redis-server", "--save", "60", "1", "--loglevel", "warning", "--requirepass", "${REDIS_PASSWORD:-paddledoc-dev-redis-password}"]
     volumes:
       - ./nas-data/redis:/data:rw
     networks:
@@ -36,8 +39,16 @@ services:
       POSTGRES_DB: ${POSTGRES_DB:-paddledoc}
       POSTGRES_USER: ${POSTGRES_USER:-paddledoc}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-change-me}
-      REDIS_URL: redis://redis:6379/0
+      REDIS_URL: redis://:${REDIS_PASSWORD:-paddledoc-dev-redis-password}@redis:6379/0
       CORS_ORIGINS: ${CORS_ORIGINS:-["*"]}
+      # Signs session cookies + the OIDC state cookie, and derives the key
+      # OIDC provider client secrets are encrypted with. The app itself
+      # refuses to start without one against this postgres-backed compose
+      # setup -- override in a .env file for anything beyond local/NAS dev.
+      SECRET_KEY: ${SECRET_KEY:-paddledoc-dev-insecure-secret-key-change-me}
+      # Base URL the backend is reachable at; used to build the OIDC
+      # redirect_uri (`{PUBLIC_API_URL}/api/v1/auth/oidc/{slug}/callback`).
+      PUBLIC_API_URL: ${PUBLIC_API_URL:-http://localhost:8000}
       OPENAI_API_BASE_URL: ${OPENAI_API_BASE_URL:-}
       OPENAI_API_BEARER_TOKEN: ${OPENAI_API_BEARER_TOKEN:-}
     volumes:
@@ -60,7 +71,12 @@ services:
       POSTGRES_DB: ${POSTGRES_DB:-paddledoc}
       POSTGRES_USER: ${POSTGRES_USER:-paddledoc}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-change-me}
-      REDIS_URL: redis://redis:6379/0
+      REDIS_URL: redis://:${REDIS_PASSWORD:-paddledoc-dev-redis-password}@redis:6379/0
+      # The worker imports app/core/config.py (directly, and via
+      # alembic/env.py if it ever runs migrations) same as the backend, which
+      # fails fast at import time if SECRET_KEY is unset for a non-sqlite
+      # database -- set here for parity, same default as the backend's.
+      SECRET_KEY: ${SECRET_KEY:-paddledoc-dev-insecure-secret-key-change-me}
       PADDLE_DEFAULT_PROFILE: ${PADDLE_DEFAULT_PROFILE:-ppocrv6_tiny}
       CELERY_WORKER_CONCURRENCY: ${CELERY_WORKER_CONCURRENCY:-1}
       CELERY_PREFETCH_MULTIPLIER: ${CELERY_PREFETCH_MULTIPLIER:-1}

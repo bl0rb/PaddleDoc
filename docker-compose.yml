@@ -20,8 +20,16 @@ services:
       - '8000:8000'
     environment:
       DATABASE_URL: postgresql+psycopg://postgres@postgres:5432/paddledoc
-      REDIS_URL: redis://redis:6379/0
+      REDIS_URL: redis://:${REDIS_PASSWORD:-paddledoc-dev-redis-password}@redis:6379/0
       CORS_ORIGINS: '["http://localhost:3000"]'
+      # Signs session cookies + the OIDC state cookie, and derives the key
+      # OIDC provider client secrets are encrypted with. The app itself
+      # refuses to start without one against this postgres-backed compose
+      # setup -- override in a .env file for anything beyond local dev.
+      SECRET_KEY: ${SECRET_KEY:-paddledoc-dev-insecure-secret-key-change-me}
+      # Base URL the backend is reachable at; used to build the OIDC
+      # redirect_uri (`{PUBLIC_API_URL}/api/v1/auth/oidc/{slug}/callback`).
+      PUBLIC_API_URL: ${PUBLIC_API_URL:-http://localhost:8000}
       OPENAI_API_BASE_URL: ${OPENAI_API_BASE_URL:-}
       OPENAI_API_BEARER_TOKEN: ${OPENAI_API_BEARER_TOKEN:-}
     volumes:
@@ -39,12 +47,22 @@ services:
     cpus: ${WORKER_CPUS:-2.0}
     environment:
       DATABASE_URL: postgresql+psycopg://postgres@postgres:5432/paddledoc
-      REDIS_URL: redis://redis:6379/0
+      REDIS_URL: redis://:${REDIS_PASSWORD:-paddledoc-dev-redis-password}@redis:6379/0
+      # The worker imports app/core/config.py (directly, and via
+      # alembic/env.py if it ever runs migrations) same as the backend, which
+      # fails fast at import time if SECRET_KEY is unset for a non-sqlite
+      # database -- set here for parity, same default as the backend's.
+      SECRET_KEY: ${SECRET_KEY:-paddledoc-dev-insecure-secret-key-change-me}
       PADDLE_DEFAULT_PROFILE: ppocrv6_tiny
       # Runtime tuning for smaller ARM hosts to reduce model load spikes.
       CELERY_WORKER_CONCURRENCY: ${CELERY_WORKER_CONCURRENCY:-1}
       CELERY_PREFETCH_MULTIPLIER: ${CELERY_PREFETCH_MULTIPLIER:-1}
       CELERY_MAX_TASKS_PER_CHILD: ${CELERY_MAX_TASKS_PER_CHILD:-5}
+      # Celery task hard/soft time limits + matching broker visibility_timeout;
+      # see app/core/config.py / app/workers/celery_app.py.
+      CELERY_TASK_SOFT_TIME_LIMIT_SECONDS: ${CELERY_TASK_SOFT_TIME_LIMIT_SECONDS:-1500}
+      CELERY_TASK_TIME_LIMIT_SECONDS: ${CELERY_TASK_TIME_LIMIT_SECONDS:-1800}
+      CELERY_BROKER_VISIBILITY_TIMEOUT_SECONDS: ${CELERY_BROKER_VISIBILITY_TIMEOUT_SECONDS:-1800}
       OMP_NUM_THREADS: ${OMP_NUM_THREADS:-1}
       ONNXRUNTIME_INTRA_OP_NUM_THREADS: ${ONNXRUNTIME_INTRA_OP_NUM_THREADS:-1}
       ONNXRUNTIME_INTER_OP_NUM_THREADS: ${ONNXRUNTIME_INTER_OP_NUM_THREADS:-1}
@@ -73,6 +91,12 @@ services:
   redis:
     image: redis:7
     restart: unless-stopped
+    # Redis is the Celery broker/result backend and reachable from every
+    # backend/worker container -- requirepass keeps it from sitting open on
+    # the compose network. Override REDIS_PASSWORD in a .env file for
+    # anything beyond local dev; backend/worker REDIS_URL above must use the
+    # same value.
+    command: ['redis-server', '--requirepass', '${REDIS_PASSWORD:-paddledoc-dev-redis-password}']
     ports:
       - '6379:6379'
 

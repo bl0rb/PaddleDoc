@@ -1,0 +1,175 @@
+"""Verifies the 0004_auth migration's upgrade/downgrade round-trip.
+
+0001_init / 0002_job_processing_info / 0002_add_password_protection use
+postgres-only DDL (`DO $$ ... END $$` blocks, native ENUM) and cannot be
+applied to a fresh sqlite database, so we can't just `alembic upgrade head`
+from an empty db here. Instead we hand-build the pre-0004 schema (mirroring
+exactly what those revisions produce) directly with sqlalchemy core, stamp
+alembic to 0003, and drive 0004 itself through the real alembic machinery.
+0004 was written to be sqlite-compatible (plain op.create_table/add_column,
+no postgres-specific DDL) specifically so this works.
+"""
+
+from pathlib import Path
+
+from alembic import command
+from alembic.config import Config
+from sqlalchemy import (
+    Column,
+    DateTime,
+    ForeignKey,
+    Integer,
+    JSON,
+    LargeBinary,
+    MetaData,
+    String,
+    Table,
+    Text,
+    UniqueConstraint,
+    create_engine,
+    inspect,
+    text,
+)
+
+from app.core.config import settings
+
+BACKEND_DIR = Path(__file__).resolve().parent.parent
+
+
+def _build_legacy_metadata() -> MetaData:
+    """The pre-0004 (i.e. post-0003) schema, built independently of the
+    current ORM models (which already include the 0004 additions)."""
+    metadata = MetaData()
+    Table(
+        'jobs', metadata,
+        Column('id', String(36), primary_key=True),
+        Column('original_filename', String(255), nullable=False),
+        Column('upload_path', String(1024), nullable=False),
+        Column('upload_content', LargeBinary, nullable=True),
+        Column('upload_mime_type', String(128), nullable=True),
+        Column('upload_size_bytes', Integer, nullable=True),
+        Column('result_path', String(1024), nullable=True),
+        Column('result_markdown', Text, nullable=True),
+        Column('status', String(32), nullable=False),
+        Column('error_message', Text, nullable=True),
+        Column('processing_info', JSON, nullable=True),
+        Column('password_hash', String(255), nullable=True),
+        Column('created_at', DateTime(timezone=True), nullable=False),
+        Column('updated_at', DateTime(timezone=True), nullable=False),
+    )
+    Table(
+        'documents', metadata,
+        Column('id', String(36), primary_key=True),
+        Column('filename', String(255), nullable=False),
+        Column('created_at', DateTime(timezone=True), nullable=False),
+    )
+    Table(
+        'chunks', metadata,
+        Column('id', String(36), primary_key=True),
+        Column('document_id', String(36), ForeignKey('documents.id', ondelete='CASCADE'), nullable=False),
+        Column('content', Text, nullable=False),
+        Column('chunk_type', String(64), nullable=False),
+        Column('metadata', JSON, nullable=False),
+    )
+    Table(
+        'tags', metadata,
+        Column('id', String(36), primary_key=True),
+        Column('name', String(64), nullable=False, unique=True),
+    )
+    Table(
+        'job_tags', metadata,
+        Column('job_id', String(36), ForeignKey('jobs.id', ondelete='CASCADE'), primary_key=True),
+        Column('tag_id', String(36), ForeignKey('tags.id', ondelete='CASCADE'), primary_key=True),
+    )
+    Table(
+        'job_markdown_versions', metadata,
+        Column('id', String(36), primary_key=True),
+        Column('job_id', String(36), ForeignKey('jobs.id', ondelete='CASCADE'), nullable=False),
+        Column('version', Integer, nullable=False),
+        Column('content', Text, nullable=False),
+        Column('created_at', DateTime(timezone=True), nullable=False),
+        UniqueConstraint('job_id', 'version', name='uq_job_markdown_versions_job_id_version'),
+    )
+    return metadata
+
+
+def _alembic_config() -> Config:
+    # Built programmatically (not Config('alembic.ini')) so it doesn't
+    # depend on the process cwd -- the ini's `script_location = alembic` is
+    # only correct relative to the backend/ directory, and tests may be run
+    # from the repo root.
+    cfg = Config()
+    cfg.set_main_option('script_location', str(BACKEND_DIR / 'alembic'))
+    return cfg
+
+
+def test_0004_auth_migration_upgrade_downgrade_round_trip(tmp_path, monkeypatch) -> None:
+    db_path = tmp_path / 'migration_scratch.db'
+    db_url = f'sqlite:///{db_path}'
+    monkeypatch.setattr(settings, 'database_url', db_url)
+
+    engine = create_engine(db_url, future=True)
+    _build_legacy_metadata().create_all(bind=engine)
+
+    cfg = _alembic_config()
+    command.stamp(cfg, '0003_job_markdown_versions')
+
+    # --- upgrade: 0004 should add the auth tables + jobs.owner_id ---
+    command.upgrade(cfg, 'head')
+
+    insp = inspect(engine)
+    tables = set(insp.get_table_names())
+    for expected in ('teams', 'auth_providers', 'users', 'sessions', 'collections'):
+        assert expected in tables, f'{expected} missing after upgrade'
+
+    job_columns = {c['name'] for c in insp.get_columns('jobs')}
+    assert 'owner_id' in job_columns
+    job_fks = insp.get_foreign_keys('jobs')
+    assert any(
+        fk['referred_table'] == 'users' and fk['constrained_columns'] == ['owner_id'] for fk in job_fks
+    ), job_fks
+
+    sessions_indexes = {ix['name'] for ix in insp.get_indexes('sessions')}
+    assert {'ix_sessions_user_id', 'ix_sessions_expires_at'} <= sessions_indexes
+
+    # sqlite reflection can't describe expression-based indexes ("Skipped
+    # unsupported reflection of expression-based index"), so confirm the
+    # case-insensitive-unique-email index directly via sqlite_master and by
+    # exercising the constraint.
+    with engine.begin() as conn:
+        ddl = conn.execute(
+            text("SELECT sql FROM sqlite_master WHERE type='index' AND name='ix_users_email_lower'")
+        ).scalar_one()
+        assert 'UNIQUE' in ddl.upper()
+        assert 'lower(email)' in ddl
+
+        conn.execute(text(
+            "INSERT INTO users (id, username, email, role, is_active, created_at, updated_at) "
+            "VALUES ('u1', 'alice', 'Alice@Example.com', 'user', 1, '2026-01-01', '2026-01-01')"
+        ))
+        try:
+            conn.execute(text(
+                "INSERT INTO users (id, username, email, role, is_active, created_at, updated_at) "
+                "VALUES ('u2', 'bob', 'alice@example.com', 'user', 1, '2026-01-01', '2026-01-01')"
+            ))
+        except Exception:
+            pass
+        else:
+            raise AssertionError('case-insensitive duplicate email was not rejected')
+
+    # --- downgrade: everything 0004 added should disappear ---
+    command.downgrade(cfg, '0003_job_markdown_versions')
+
+    insp = inspect(engine)
+    tables = set(insp.get_table_names())
+    for removed in ('teams', 'auth_providers', 'users', 'sessions', 'collections'):
+        assert removed not in tables, f'{removed} still present after downgrade'
+    job_columns = {c['name'] for c in insp.get_columns('jobs')}
+    assert 'owner_id' not in job_columns
+
+    # --- re-upgrade: should cleanly re-apply from the 0003 baseline ---
+    command.upgrade(cfg, 'head')
+    insp = inspect(engine)
+    tables = set(insp.get_table_names())
+    for expected in ('teams', 'auth_providers', 'users', 'sessions', 'collections'):
+        assert expected in tables

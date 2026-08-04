@@ -1,3 +1,31 @@
-from app.models.models import Base, Chunk, Document, Job, JobMarkdownVersion, JobStatus
+from app.models.models import (
+    AuthProvider,
+    Base,
+    Chunk,
+    Collection,
+    Document,
+    Job,
+    JobMarkdownVersion,
+    JobStatus,
+    Session,
+    Tag,
+    Team,
+    User,
+    UserRole,
+)
 
-__all__ = ['Base', 'Chunk', 'Document', 'Job', 'JobMarkdownVersion', 'JobStatus']
+__all__ = [
+    'AuthProvider',
+    'Base',
+    'Chunk',
+    'Collection',
+    'Document',
+    'Job',
+    'JobMarkdownVersion',
+    'JobStatus',
+    'Session',
+    'Tag',
+    'Team',
+    'User',
+    'UserRole',
+]
