@@ -88,4 +88,15 @@ jobs:
         run: helm lint charts/paddledoc
 
       - name: Render Helm chart
-        run: helm template test charts/paddledoc -f charts/paddledoc/examples/nas-cpu-external-postgres.yaml > /dev/null
+        run: |
+          helm template test charts/paddledoc \
+            -f charts/paddledoc/examples/nas-cpu-external-postgres.yaml \
+            --set auth.secretKey.value=ci-render-check-secret > /dev/null
+
+      - name: Render Helm chart fails without SECRET_KEY
+        run: |
+          if helm template test charts/paddledoc \
+               -f charts/paddledoc/examples/nas-cpu-external-postgres.yaml > /dev/null 2>&1; then
+            echo "expected render to fail when auth.required=true and no SECRET_KEY is set"
+            exit 1
+          fi

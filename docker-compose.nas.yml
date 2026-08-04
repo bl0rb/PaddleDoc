@@ -40,7 +40,11 @@ services:
       POSTGRES_USER: ${POSTGRES_USER:-paddledoc}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-change-me}
       REDIS_URL: redis://:${REDIS_PASSWORD:-paddledoc-dev-redis-password}@redis:6379/0
-      CORS_ORIGINS: ${CORS_ORIGINS:-["*"]}
+      # Concrete origin, not "*": the app sends credentialed CORS responses
+      # (session cookies), so a wildcard would reflect any origin back with
+      # Access-Control-Allow-Credentials. Set CORS_ORIGINS to your NAS
+      # frontend URL(s), e.g. '["https://paddledoc.example.lan"]'.
+      CORS_ORIGINS: ${CORS_ORIGINS:-["http://localhost:3000"]}
       # Signs session cookies + the OIDC state cookie, and derives the key
       # OIDC provider client secrets are encrypted with. The app itself
       # refuses to start without one against this postgres-backed compose
