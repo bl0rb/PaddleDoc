@@ -5,8 +5,8 @@ import { Sparkles } from 'lucide-react';
 import Link from 'next/link';
 
 import { Button } from '@/components/ui/button';
+import { apiFetch } from '@/lib/api';
 import {
-  API,
   type ContainerState,
   type DashboardStats,
   type Job,
@@ -175,7 +175,7 @@ export function HomeDashboard() {
 
   useEffect(() => {
     const refreshJobs = async () => {
-      const response = await fetch(`${API}/api/v1/jobs`, { cache: 'no-store' });
+      const response = await apiFetch(`/api/v1/jobs`, { cache: 'no-store' });
       if (!response.ok) return;
       const payload = await response.json();
       const items = (payload.items ?? []) as Job[];
@@ -183,14 +183,14 @@ export function HomeDashboard() {
     };
 
     const refreshStats = async () => {
-      const response = await fetch(`${API}/api/v1/stats`, { cache: 'no-store' });
+      const response = await apiFetch(`/api/v1/stats`, { cache: 'no-store' });
       if (!response.ok) return;
       const payload = (await response.json()) as DashboardStats;
       startTransition(() => setStats(payload));
     };
 
     const refreshPaddleStatus = async () => {
-      const response = await fetch(`${API}/api/v1/paddle/status`, { cache: 'no-store' });
+      const response = await apiFetch(`/api/v1/paddle/status`, { cache: 'no-store' });
       if (!response.ok) {
         startTransition(() => setService(initialSnapshot));
         return;

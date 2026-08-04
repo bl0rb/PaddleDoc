@@ -5,6 +5,7 @@ import Link from 'next/link';
 import { useParams } from 'next/navigation';
 
 import { Button } from '@/components/ui/button';
+import { apiFetch, redirectIfSessionExpired } from '@/lib/api';
 import { API_BASE_URL } from '@/lib/api-base';
 
 const LOWER_PROFILE_RETRY_MAP: Record<string, string> = {
@@ -47,7 +48,7 @@ export default function JobDetails() {
       if (!id) {
         return;
       }
-      const jobResp = await fetch(`${API}/api/v1/jobs/${id}`, { cache: 'no-store' });
+      const jobResp = await apiFetch(`/api/v1/jobs/${id}`, { cache: 'no-store' });
       if (!jobResp.ok) {
         setLoadError('Failed to load job');
         return;
@@ -55,8 +56,13 @@ export default function JobDetails() {
       const jobData = await jobResp.json();
       setJob(jobData);
       if (jobData.status === 'FINISHED') {
-        const previewResp = await fetch(`${API}/api/v1/jobs/${id}/preview`, { cache: 'no-store' });
+        const previewResp = await apiFetch(`/api/v1/jobs/${id}/preview`, { cache: 'no-store', skipAuthRedirect: true });
         if (previewResp.status === 401) {
+          // Could also be an expired session — redirect instead of
+          // showing a password prompt that can never succeed.
+          if (await redirectIfSessionExpired()) {
+            return;
+          }
           setRequirePassword(true);
           return;
         }
@@ -79,8 +85,11 @@ export default function JobDetails() {
       url.searchParams.set('password', password);
     }
     
-    const previewResp = await fetch(url.toString(), { cache: 'no-store' });
+    const previewResp = await apiFetch(url.toString(), { cache: 'no-store', skipAuthRedirect: true });
     if (previewResp.status === 401) {
+      if (await redirectIfSessionExpired()) {
+        return;
+      }
       setLoadError('Invalid password');
       return;
     }
@@ -143,14 +152,14 @@ export default function JobDetails() {
     setIsRetryingLower(true);
     setLoadError(null);
     try {
-      const response = await fetch(`${API}/api/v1/jobs/${job.id}/retry-lower-profile`, { method: 'POST' });
+      const response = await apiFetch(`/api/v1/jobs/${job.id}/retry-lower-profile`, { method: 'POST' });
       if (!response.ok) {
         const payload = await response.json().catch(() => ({}));
         const detail = typeof payload?.detail === 'string' ? payload.detail : 'Failed to retry with lower profile.';
         setLoadError(detail);
         return;
       }
-      const refreshed = await fetch(`${API}/api/v1/jobs/${job.id}`, { cache: 'no-store' });
+      const refreshed = await apiFetch(`/api/v1/jobs/${job.id}`, { cache: 'no-store' });
       if (refreshed.ok) {
         const jobData = await refreshed.json();
         setJob(jobData);
@@ -171,13 +180,21 @@ export default function JobDetails() {
     if (password) {
       url.searchParams.set('password', password);
     }
-    const response = await fetch(url.toString(), {
+    const response = await apiFetch(url.toString(), {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ markdown: draftMarkdown }),
+      skipAuthRedirect: true,
     });
     if (!response.ok) {
-      setSaveMessage('Save failed. Ensure YAML frontmatter remains intact.');
+      if (response.status === 401 && (await redirectIfSessionExpired())) {
+        return;
+      }
+      setSaveMessage(
+        response.status === 401
+          ? 'Save failed: wrong document password.'
+          : 'Save failed. Ensure YAML frontmatter remains intact.'
+      );
       setIsSaving(false);
       return;
     }

@@ -144,6 +144,7 @@ export function sendFormDataWithProgress(
   return new Promise<void>((resolve, reject) => {
     const xhr = new XMLHttpRequest();
     xhr.open('POST', url);
+    xhr.withCredentials = true;
     xhr.upload.onprogress = (event) => {
       if (event.lengthComputable) {
         onProgress?.(event.loaded, event.total);
@@ -153,6 +154,9 @@ export function sendFormDataWithProgress(
       if (xhr.status >= 200 && xhr.status < 300) {
         resolve();
         return;
+      }
+      if (xhr.status === 401 && typeof window !== 'undefined') {
+        window.location.assign('/login');
       }
       reject(new Error(`Upload failed with status ${xhr.status}`));
     };

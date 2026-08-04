@@ -6,6 +6,7 @@ import { Sparkles, UploadCloud } from 'lucide-react';
 import { useRouter } from 'next/navigation';
 
 import { Button } from '@/components/ui/button';
+import { apiFetch } from '@/lib/api';
 import {
   API,
   type FolderOptions,
@@ -62,7 +63,7 @@ export function ProcessingFlow() {
   const selectedSubfolderOptions = folder ? (folderOptions[folder] ?? []) : [];
 
   const refreshFolderOptions = async () => {
-    const response = await fetch(`${API}/api/v1/jobs`, { cache: 'no-store' });
+    const response = await apiFetch(`/api/v1/jobs`, { cache: 'no-store' });
     if (!response.ok) return;
     const payload = await response.json();
     const items = (payload.items ?? []) as Job[];
@@ -70,7 +71,7 @@ export function ProcessingFlow() {
   };
 
   const refreshPaddleSettings = async () => {
-    const response = await fetch(`${API}/api/v1/paddle/settings`, { cache: 'no-store' });
+    const response = await apiFetch(`/api/v1/paddle/settings`, { cache: 'no-store' });
     if (!response.ok) return;
     const payload = await response.json();
     setSettings({
@@ -81,7 +82,7 @@ export function ProcessingFlow() {
   };
 
   const refreshPaddleCapabilities = async () => {
-    const response = await fetch(`${API}/api/v1/paddle/capabilities`, { cache: 'no-store' });
+    const response = await apiFetch(`/api/v1/paddle/capabilities`, { cache: 'no-store' });
     if (!response.ok) return;
     const payload = await response.json();
     setCapabilities({ profiles: payload.profiles ?? [] });
@@ -92,9 +93,9 @@ export function ProcessingFlow() {
 
     const loadInitialData = async () => {
       const [jobsResponse, settingsResponse, capabilitiesResponse] = await Promise.all([
-        fetch(`${API}/api/v1/jobs`, { cache: 'no-store' }),
-        fetch(`${API}/api/v1/paddle/settings`, { cache: 'no-store' }),
-        fetch(`${API}/api/v1/paddle/capabilities`, { cache: 'no-store' }),
+        apiFetch(`/api/v1/jobs`, { cache: 'no-store' }),
+        apiFetch(`/api/v1/paddle/settings`, { cache: 'no-store' }),
+        apiFetch(`/api/v1/paddle/capabilities`, { cache: 'no-store' }),
       ]);
 
       if (!cancelled && jobsResponse.ok) {
@@ -175,7 +176,7 @@ export function ProcessingFlow() {
     if (collectionId) {
       return collectionId;
     }
-    const response = await fetch(`${API}/api/v1/collections`, {
+    const response = await apiFetch(`/api/v1/collections`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -257,7 +258,7 @@ export function ProcessingFlow() {
     }
     setBusy(true);
     setFlowMessage(null);
-    const response = await fetch(`${API}/api/v1/collections/${collectionId}/start`, {
+    const response = await apiFetch(`/api/v1/collections/${collectionId}/start`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ profile_id: selectedProfile.value }),
@@ -291,7 +292,7 @@ export function ProcessingFlow() {
     setSavingSettings(true);
     setSettingsMessage(null);
     const requestedProfile = settings.default_profile;
-    const response = await fetch(`${API}/api/v1/paddle/settings`, {
+    const response = await apiFetch(`/api/v1/paddle/settings`, {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(settings),
@@ -325,7 +326,7 @@ export function ProcessingFlow() {
       return;
     }
     setFolderBusy(true);
-    const response = await fetch(`${API}/api/v1/folders`, {
+    const response = await apiFetch(`/api/v1/folders`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ folder: folderValue, subfolder: subfolderValue }),

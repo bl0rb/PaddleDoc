@@ -1,7 +1,7 @@
 import type { Metadata } from "next";
 import { Lora, Source_Sans_3 } from 'next/font/google';
 import Script from 'next/script';
-import { SidebarNav } from '@/components/sidebar-nav';
+import { AppChrome } from '@/components/app-chrome';
 import "./globals.css";
 
 const sourceSans = Source_Sans_3({
@@ -41,8 +41,7 @@ export default function RootLayout({
         <Script src="/runtime-env.js" strategy="beforeInteractive" />
       </head>
       <body className="min-h-full flex flex-col">
-        <SidebarNav />
-        {children}
+        <AppChrome>{children}</AppChrome>
       </body>
     </html>
   );

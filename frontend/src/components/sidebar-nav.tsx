@@ -3,7 +3,8 @@
 import { useEffect, useRef, useState } from 'react';
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
-import { Home, Menu, X, Cpu, FolderOpen } from 'lucide-react';
+import { Home, Menu, X, Cpu, FolderOpen, Shield, LogOut } from 'lucide-react';
+import { useAuth } from '@/lib/auth-context';
 
 const links = [
   { href: '/', label: 'Home', icon: Home },
@@ -15,6 +16,7 @@ export function SidebarNav() {
   const [open, setOpen] = useState(false);
   const pathname = usePathname();
   const drawerRef = useRef<HTMLDivElement>(null);
+  const { user, logout } = useAuth();
 
   // Close on outside click
   useEffect(() => {
@@ -90,8 +92,55 @@ export function SidebarNav() {
           })}
         </nav>
 
-        <div className="border-t border-slate-100 px-5 py-4">
-          <p className="text-xs text-slate-400">PaddleOCR document pipeline</p>
+        <div className="border-t border-slate-100 px-3 py-3">
+          {user ? (
+            <>
+              {user.role === 'admin' && (
+                <Link
+                  href="/admin"
+                  onClick={() => setOpen(false)}
+                  className={`mb-2 flex items-center gap-3 rounded-xl px-3 py-2.5 text-sm font-medium transition ${
+                    pathname === '/admin' || pathname.startsWith('/admin/')
+                      ? 'bg-emerald-50 text-emerald-800'
+                      : 'text-slate-600 hover:bg-slate-50 hover:text-slate-950'
+                  }`}
+                >
+                  <Shield
+                    className={`h-4 w-4 flex-shrink-0 ${
+                      pathname === '/admin' || pathname.startsWith('/admin/')
+                        ? 'text-emerald-700'
+                        : 'text-slate-400'
+                    }`}
+                  />
+                  Admin
+                </Link>
+              )}
+              <div className="flex items-center justify-between gap-2 rounded-xl px-3 py-2">
+                <div className="min-w-0">
+                  <p className="truncate text-sm font-medium text-slate-950">{user.username}</p>
+                  <span
+                    className={`mt-0.5 inline-block rounded-full px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide ${
+                      user.role === 'admin'
+                        ? 'bg-emerald-50 text-emerald-700'
+                        : 'bg-slate-100 text-slate-600'
+                    }`}
+                  >
+                    {user.role}
+                  </span>
+                </div>
+                <button
+                  onClick={() => logout()}
+                  aria-label="Log out"
+                  title="Log out"
+                  className="flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-lg text-slate-400 transition hover:bg-slate-50 hover:text-slate-700"
+                >
+                  <LogOut className="h-4 w-4" />
+                </button>
+              </div>
+            </>
+          ) : (
+            <p className="px-3 py-1 text-xs text-slate-400">PaddleOCR document pipeline</p>
+          )}
         </div>
       </div>
     </>

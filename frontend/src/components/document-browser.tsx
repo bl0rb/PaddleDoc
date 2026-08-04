@@ -5,6 +5,7 @@ import Link from 'next/link';
 import { Download, LoaderCircle, RefreshCcw, RotateCcw, Trash2 } from 'lucide-react';
 
 import { Button } from '@/components/ui/button';
+import { apiFetch, redirectIfSessionExpired } from '@/lib/api';
 import { API_BASE_URL } from '@/lib/api-base';
 
 type JobStatus = 'PENDING' | 'RUNNING' | 'FINISHED' | 'FAILED';
@@ -195,7 +196,7 @@ export function DocumentBrowser({
       params.set('to_date', toDate);
     }
 
-    const response = await fetch(`${API}/api/v1/${endpoint}${params.toString() ? `?${params.toString()}` : ''}`, {
+    const response = await apiFetch(`/api/v1/${endpoint}${params.toString() ? `?${params.toString()}` : ''}`, {
       cache: 'no-store',
     });
     if (response.ok) {
@@ -207,7 +208,7 @@ export function DocumentBrowser({
 
   useEffect(() => {
     const run = async () => {
-      const response = await fetch(`${API}/api/v1/${endpoint}`, {
+      const response = await apiFetch(`/api/v1/${endpoint}`, {
         cache: 'no-store',
       });
       if (!response.ok) {
@@ -235,8 +236,13 @@ export function DocumentBrowser({
     if (password) {
       url.searchParams.set('password', password);
     }
-    const response = await fetch(url, { method: 'DELETE' });
+    const response = await apiFetch(url.toString(), { method: 'DELETE', skipAuthRedirect: true });
     if (response.status === 401) {
+      // A 401 here can also mean the session expired — don't show a
+      // document-password prompt that can never succeed in that case.
+      if (await redirectIfSessionExpired()) {
+        return;
+      }
       setProtectedJobId(id);
       setProtectedJobPassword('');
       return;
@@ -252,7 +258,7 @@ export function DocumentBrowser({
   const removeFolder = async (folderPath: string) => {
     setDeletingFolder(folderPath);
     const url = new URL(`${API}/api/v1/folders/${encodeURI(folderPath)}`);
-    await fetch(url, { method: 'DELETE' });
+    await apiFetch(url.toString(), { method: 'DELETE' });
     if (selectedFolder === folderPath || selectedFolder.startsWith(`${folderPath}/`)) {
       setSelectedFolder('all');
     }
@@ -263,7 +269,7 @@ export function DocumentBrowser({
   const downloadFolder = async (folderPath: string) => {
     setDownloadingFolder(folderPath);
     try {
-      const response = await fetch(`${API}/api/v1/folders/${encodeURI(folderPath)}/download`);
+      const response = await apiFetch(`/api/v1/folders/${encodeURI(folderPath)}/download`);
       if (!response.ok) {
         alert('No downloadable markdown files found in this folder.');
         return;
@@ -289,7 +295,7 @@ export function DocumentBrowser({
     }
     setRestartingFolder(folderPath);
     try {
-      const response = await fetch(`${API}/api/v1/folders/${encodeURI(folderPath)}/restart`, { method: 'POST' });
+      const response = await apiFetch(`/api/v1/folders/${encodeURI(folderPath)}/restart`, { method: 'POST' });
       if (!response.ok) {
         const payload = await response.json().catch(() => ({}));
         const detail = typeof payload?.detail === 'string' ? payload.detail : 'Failed to restart folder jobs.';
@@ -321,7 +327,7 @@ export function DocumentBrowser({
     }
     setRestartingPending(true);
     try {
-      const response = await fetch(`${API}/api/v1/jobs/restart-pending`, { method: 'POST' });
+      const response = await apiFetch(`/api/v1/jobs/restart-pending`, { method: 'POST' });
       if (!response.ok) {
         alert('Failed to restart pending jobs.');
         return;
@@ -340,7 +346,7 @@ export function DocumentBrowser({
     }
     setRestartingJobId(jobId);
     try {
-      const response = await fetch(`${API}/api/v1/jobs/${jobId}/restart`, { method: 'POST' });
+      const response = await apiFetch(`/api/v1/jobs/${jobId}/restart`, { method: 'POST' });
       if (!response.ok) {
         const payload = await response.json().catch(() => ({}));
         const detail = typeof payload?.detail === 'string' ? payload.detail : 'Failed to restart job.';
@@ -380,7 +386,7 @@ export function DocumentBrowser({
 
     setRetryingLowerJobId(job.id);
     try {
-      const response = await fetch(`${API}/api/v1/jobs/${job.id}/retry-lower-profile`, { method: 'POST' });
+      const response = await apiFetch(`/api/v1/jobs/${job.id}/retry-lower-profile`, { method: 'POST' });
       if (!response.ok) {
         const payload = await response.json().catch(() => ({}));
         const detail = typeof payload?.detail === 'string' ? payload.detail : 'Failed to retry with lower profile.';
