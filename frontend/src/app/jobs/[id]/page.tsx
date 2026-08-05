@@ -141,6 +141,17 @@ export default function JobDetails() {
   const blockCount = typeof structure?.block_count === 'number' ? structure.block_count : null;
   const pageCount = typeof structure?.page_count === 'number' ? structure.page_count : null;
   const warning = typeof execution?.warning === 'string' ? execution.warning : null;
+  // Requeue paths (restart, retry-lower) keep the previous run's execution
+  // fields until a worker claims the job, so both banners must only reflect
+  // a finished run — otherwise they show stale/contradictory data while
+  // the job is PENDING/RUNNING.
+  const usedFallback = job.status === 'FINISHED' && execution?.used_fallback === true;
+  const fallbackReason = typeof execution?.fallback_reason === 'string' ? execution.fallback_reason : null;
+  const engine = typeof execution?.engine === 'string' ? execution.engine : null;
+  const resolvedProfileId = typeof execution?.profile_id === 'string' ? execution.profile_id : null;
+  const profileMismatch = Boolean(
+    job.status === 'FINISHED' && selectedProfileId && resolvedProfileId && selectedProfileId !== resolvedProfileId
+  );
   const suggestedLowerProfile =
     (typeof execution?.suggested_profile_id === 'string' ? execution.suggested_profile_id : null) ||
     (typeof settings?.profile_id === 'string' ? LOWER_PROFILE_RETRY_MAP[settings.profile_id] ?? null : null);
@@ -222,6 +233,26 @@ export default function JobDetails() {
         {selectedProfileLabel && <p>Profile name: {selectedProfileLabel}</p>}
         {converter && <p>Converter: {converter}</p>}
         {pageCount !== null && blockCount !== null && <p>Structure: {pageCount} pages, {blockCount} blocks</p>}
+        {usedFallback && (
+          <div className="rounded-md border border-red-300 bg-red-50 p-3 text-red-900">
+            <p className="text-sm font-semibold">
+              OCR did not run — this result came from the {engine ?? 'plain-text'} extraction fallback.
+            </p>
+            <p className="mt-1 text-sm">
+              The selected profile{selectedProfileLabel ? ` (${selectedProfileLabel})` : ''} had no effect on this
+              output. Fix the worker (see reason below), then restart this job from the jobs list to run real OCR.
+            </p>
+            {fallbackReason && <p className="mt-1 break-words text-sm">Reason: {fallbackReason}</p>}
+          </div>
+        )}
+        {!usedFallback && profileMismatch && (
+          <div className="rounded-md border border-amber-300 bg-amber-50 p-3 text-amber-900">
+            <p className="text-sm">
+              Requested profile {selectedProfileId} is unknown to the worker; the job ran with {resolvedProfileId}{' '}
+              instead.
+            </p>
+          </div>
+        )}
         {job.status === 'FAILED' && (
           <div className="rounded-md border border-amber-300 bg-amber-50 p-3 text-amber-900">
             <p className="text-sm">

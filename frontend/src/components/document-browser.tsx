@@ -102,6 +102,16 @@ function profileForJob(job: Job): string {
   return requestedProfile || '-';
 }
 
+function usedFallbackForJob(job: Job): boolean {
+  // Only trust used_fallback on FINISHED jobs: requeue paths keep the
+  // previous run's execution fields until a worker claims the job.
+  return job.status === 'FINISHED' && job.processing_info?.execution?.used_fallback === true;
+}
+
+function profileSortValue(job: Job): string {
+  return usedFallbackForJob(job) ? 'fallback (no OCR)' : profileForJob(job);
+}
+
 function qualityForJob(job: Job): { grade: string; score: number | null } | null {
   const execution = job.processing_info?.execution;
   const qualityGate =
@@ -439,7 +449,7 @@ export function DocumentBrowser({
           comparison = left.status.localeCompare(right.status);
           break;
         case 'profile':
-          comparison = profileForJob(left).localeCompare(profileForJob(right), undefined, { sensitivity: 'base' });
+          comparison = profileSortValue(left).localeCompare(profileSortValue(right), undefined, { sensitivity: 'base' });
           break;
         case 'pages':
           comparison = Number(pageCountForJob(left)) - Number(pageCountForJob(right));
@@ -707,11 +717,22 @@ export function DocumentBrowser({
                           : job.error_message || 'Processing stopped. Retry with a lower profile.'}
                       </p>
                     )}
+                    {usedFallbackForJob(job) && (
+                      <p className="mt-1 text-xs font-medium text-red-700">
+                        No OCR ran — plain-text fallback output (selected profile had no effect)
+                      </p>
+                    )}
                   </td>
                   <td className="py-3">
                     <span className={`rounded px-2 py-1 text-xs ${statusBadge[job.status]}`}>{job.status}</span>
                   </td>
-                  <td className="hidden py-3 text-slate-700 lg:table-cell">{profileForJob(job)}</td>
+                  <td className="hidden py-3 lg:table-cell">
+                    {usedFallbackForJob(job) ? (
+                      <span className="text-red-700">fallback (no OCR)</span>
+                    ) : (
+                      <span className="text-slate-700">{profileForJob(job)}</span>
+                    )}
+                  </td>
                   <td className="py-3 text-slate-700">{pageCountForJob(job)}</td>
                   <td className="hidden py-3 text-slate-700 sm:table-cell">
                     {(() => {

@@ -54,10 +54,10 @@ _PADDLE_PROFILES: dict[str, dict[str, str]] = {
     'ppocrv6_small': {
         'value': 'ppocrv6_small',
         'label': 'PP-OCRv6 small det + rec',
-        'description': 'Balanced OCR preset (det+rec). Mapped to the standard PP-OCRv6 model family.',
+        'description': 'Balanced OCR preset (det+rec) using the PP-OCRv6 small models.',
         'pipeline': 'ppstructurev3',
-        'text_detection_model_name': 'PP-OCRv6_det',
-        'text_recognition_model_name': 'PP-OCRv6_rec',
+        'text_detection_model_name': 'PP-OCRv6_small_det',
+        'text_recognition_model_name': 'PP-OCRv6_small_rec',
         'use_table_recognition': 'false',
     },
     'ppocrv6_small_structurev3': {
@@ -65,8 +65,8 @@ _PADDLE_PROFILES: dict[str, dict[str, str]] = {
         'label': 'PP-StructureV3 + PP-OCRv6 small det + rec',
         'description': 'Small det+rec with PP-StructureV3 for richer structured output.',
         'pipeline': 'ppstructurev3',
-        'text_detection_model_name': 'PP-OCRv6_det',
-        'text_recognition_model_name': 'PP-OCRv6_rec',
+        'text_detection_model_name': 'PP-OCRv6_small_det',
+        'text_recognition_model_name': 'PP-OCRv6_small_rec',
         'use_table_recognition': 'true',
     },
     'ppocrv6_medium': {
