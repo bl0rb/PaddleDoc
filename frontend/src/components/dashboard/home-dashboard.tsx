@@ -88,10 +88,7 @@ const HeroPanel = memo(function HeroPanel({
             </p>
             <div className="mt-6 flex flex-wrap gap-3">
               <Link href="/jobs">
-                <Button>Go to jobs</Button>
-              </Link>
-              <Link href="/processing#upload-flow">
-                <Button variant="outline">Go to upload flow</Button>
+                <Button>Tasks</Button>
               </Link>
             </div>
           </div>
