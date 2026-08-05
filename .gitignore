@@ -7,6 +7,7 @@ __pycache__/
 .env
 venv/
 backend/.venv/
+test.db
 backend/test.db
 backend/storage/uploads/*
 backend/storage/results/*

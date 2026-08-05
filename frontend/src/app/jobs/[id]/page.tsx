@@ -5,6 +5,7 @@ import Link from 'next/link';
 import { useParams } from 'next/navigation';
 
 import { Button } from '@/components/ui/button';
+import { MarkdownView, type JobArtifact } from '@/components/markdown/markdown-view';
 import { apiFetch, redirectIfSessionExpired } from '@/lib/api';
 import { API_BASE_URL } from '@/lib/api-base';
 
@@ -41,6 +42,33 @@ export default function JobDetails() {
   const [password, setPassword] = useState('');
   const [loadError, setLoadError] = useState<string | null>(null);
   const [isRetryingLower, setIsRetryingLower] = useState(false);
+  const [viewTab, setViewTab] = useState<'rendered' | 'raw'>('raw');
+  // null = artifact list not fetched yet (images render skeletons); [] after
+  // a completed fetch that found nothing or failed (broken-image placeholder).
+  const [artifacts, setArtifacts] = useState<JobArtifact[] | null>(null);
+
+  const loadArtifacts = async (id: string, pw: string) => {
+    try {
+      const url = new URL(`${API}/api/v1/jobs/${id}/artifacts`);
+      if (pw) {
+        url.searchParams.set('password', pw);
+      }
+      // skipAuthRedirect: a 401 here means the document password, same as
+      // the sibling /preview fetches — never bounce to /login for it.
+      const resp = await apiFetch(url.toString(), { cache: 'no-store', skipAuthRedirect: true });
+      if (resp.ok) {
+        const payload = await resp.json();
+        setArtifacts(Array.isArray(payload?.items) ? payload.items : []);
+      } else {
+        // Completed but failed: resolve to "no artifacts" so images show the
+        // error placeholder instead of a never-ending skeleton.
+        setArtifacts([]);
+      }
+    } catch {
+      // Non-fatal: artifact images fall back to their placeholder.
+      setArtifacts([]);
+    }
+  };
 
   useEffect(() => {
     const run = async () => {
@@ -55,6 +83,8 @@ export default function JobDetails() {
       }
       const jobData = await jobResp.json();
       setJob(jobData);
+      const jobSettings = jobData.processing_info?.settings as Record<string, unknown> | undefined;
+      setViewTab(jobSettings?.mode === 'import' ? 'rendered' : 'raw');
       if (jobData.status === 'FINISHED') {
         const previewResp = await apiFetch(`/api/v1/jobs/${id}/preview`, { cache: 'no-store', skipAuthRedirect: true });
         if (previewResp.status === 401) {
@@ -70,6 +100,7 @@ export default function JobDetails() {
           const text = await previewResp.text();
           setMarkdown(text);
           setDraftMarkdown(text);
+          void loadArtifacts(id, '');
         }
       }
     };
@@ -99,6 +130,7 @@ export default function JobDetails() {
       setDraftMarkdown(text);
       setRequirePassword(false);
       setLoadError(null);
+      void loadArtifacts(id, password);
     }
   };
 
@@ -264,6 +296,29 @@ export default function JobDetails() {
               Edit
             </Button>
           </div>
+          {!isEditing && (
+            // Plain toggle buttons (aria-pressed), not an ARIA tabs widget:
+            // the full tablist pattern needs panel wiring + arrow-key focus,
+            // which these two view switchers do not implement.
+            <div className="mb-2 flex items-center gap-2">
+              <Button
+                size="sm"
+                aria-pressed={viewTab === 'rendered'}
+                variant={viewTab === 'rendered' ? 'default' : 'outline'}
+                onClick={() => setViewTab('rendered')}
+              >
+                Rendered
+              </Button>
+              <Button
+                size="sm"
+                aria-pressed={viewTab === 'raw'}
+                variant={viewTab === 'raw' ? 'default' : 'outline'}
+                onClick={() => setViewTab('raw')}
+              >
+                Raw
+              </Button>
+            </div>
+          )}
           {isEditing ? (
             <div className="space-y-2">
               <textarea
@@ -287,6 +342,10 @@ export default function JobDetails() {
                 </Button>
               </div>
               {saveMessage && <p className="text-sm text-slate-600">{saveMessage}</p>}
+            </div>
+          ) : viewTab === 'rendered' ? (
+            <div className="rounded-md border border-slate-200 bg-white p-4">
+              <MarkdownView markdown={markdown} jobId={job.id} password={password || undefined} artifacts={artifacts} />
             </div>
           ) : (
             <pre className="overflow-x-auto whitespace-pre-wrap break-words rounded-md border border-slate-200 bg-white p-4 text-sm text-emerald-800">{markdown}</pre>
