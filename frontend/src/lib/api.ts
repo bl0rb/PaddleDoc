@@ -78,8 +78,30 @@ export async function redirectIfSessionExpired(): Promise<boolean> {
 }
 
 /**
+ * Flattens a FastAPI request-validation `detail` array
+ * (`[{loc, msg, type}, …]`) into a readable field-prefixed message.
+ * Returns null when the shape does not match.
+ */
+function formatValidationDetail(detail: unknown): string | null {
+  if (!Array.isArray(detail)) return null;
+  const messages = detail
+    .map((entry) => {
+      if (typeof entry !== 'object' || entry === null) return null;
+      const { loc, msg } = entry as { loc?: unknown; msg?: unknown };
+      if (typeof msg !== 'string') return null;
+      const field = Array.isArray(loc)
+        ? loc.filter((part): part is string => typeof part === 'string' && part !== 'body').join('.')
+        : '';
+      return field ? `${field}: ${msg}` : msg;
+    })
+    .filter((message): message is string => Boolean(message));
+  return messages.length > 0 ? messages.join('; ') : null;
+}
+
+/**
  * {@link apiFetch} + ok-check + JSON parse.
- * Throws {@link ApiError} carrying the backend `detail` string when available.
+ * Throws {@link ApiError} carrying the backend `detail` when available —
+ * either the plain string or a flattened Pydantic validation-error array.
  */
 export async function apiJson<T>(path: string, init?: ApiFetchInit): Promise<T> {
   const res = await apiFetch(path, init);
@@ -90,6 +112,8 @@ export async function apiJson<T>(path: string, init?: ApiFetchInit): Promise<T> 
       const body = await res.json();
       if (typeof body?.detail === 'string') {
         detail = body.detail;
+      } else {
+        detail = formatValidationDetail(body?.detail) ?? detail;
       }
     } catch {
       // Non-JSON error body — keep the generic message.

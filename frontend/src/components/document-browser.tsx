@@ -36,6 +36,13 @@ type DocumentBrowserProps = {
   includeDateFilters?: boolean;
   compact?: boolean;
   hideHeader?: boolean;
+  /**
+   * Preselects the folder filter (e.g. from a ?folder= deep link). Read only
+   * by the state initializer — pass a `key` derived from it (see
+   * app/jobs/page.tsx) so a searchParams-only navigation, which re-renders
+   * the server page without remounting this client component, still applies.
+   */
+  initialFolder?: string;
 };
 
 const API = API_BASE_URL;
@@ -85,6 +92,12 @@ function jobFolderPath(job: Job): string {
     return 'inbox';
   }
   return parts.slice(0, -1).join('/');
+}
+
+function isImportJob(job: Job): boolean {
+  // Confluence-import page jobs must not be restarted (the backend 409s:
+  // a restart would wipe the converted markdown and OCR the raw HTML).
+  return job.processing_info?.settings?.mode === 'import';
 }
 
 function profileForJob(job: Job): string {
@@ -139,6 +152,7 @@ export function DocumentBrowser({
   includeDateFilters = true,
   compact = false,
   hideHeader = false,
+  initialFolder,
 }: DocumentBrowserProps) {
   const pageSize = 50;
   const [items, setItems] = useState<Job[]>([]);
@@ -149,7 +163,7 @@ export function DocumentBrowser({
   const [toDate, setToDate] = useState('');
   const [loading, setLoading] = useState(false);
   const [restartingPending, setRestartingPending] = useState(false);
-  const [selectedFolder, setSelectedFolder] = useState<string>('all');
+  const [selectedFolder, setSelectedFolder] = useState<string>(initialFolder?.trim() || 'all');
   const [deletingFolder, setDeletingFolder] = useState<string | null>(null);
   const [downloadingFolder, setDownloadingFolder] = useState<string | null>(null);
   const [restartingFolder, setRestartingFolder] = useState<string | null>(null);
@@ -761,16 +775,18 @@ export function DocumentBrowser({
                             {retryingLowerJobId === job.id ? 'Retrying...' : 'Retry Lower'}
                           </Button>
                         )}
-                        <Button
-                          type="button"
-                          size="sm"
-                          variant="outline"
-                          disabled={job.status === 'RUNNING' || restartingJobId === job.id}
-                          onClick={() => void restartJob(job.id)}
-                        >
-                          <RotateCcw className="mr-2 h-4 w-4" />
-                          {restartingJobId === job.id ? 'Restarting...' : 'Restart'}
-                        </Button>
+                        {!isImportJob(job) && (
+                          <Button
+                            type="button"
+                            size="sm"
+                            variant="outline"
+                            disabled={job.status === 'RUNNING' || restartingJobId === job.id}
+                            onClick={() => void restartJob(job.id)}
+                          >
+                            <RotateCcw className="mr-2 h-4 w-4" />
+                            {restartingJobId === job.id ? 'Restarting...' : 'Restart'}
+                          </Button>
+                        )}
                         {allowDelete && (
                           <Button
                             type="button"

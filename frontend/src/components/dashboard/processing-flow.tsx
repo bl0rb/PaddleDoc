@@ -470,7 +470,7 @@ export function ProcessingFlow() {
               exit={{ opacity: 0, y: -12 }}
               className="space-y-4"
             >
-              <div className="grid gap-3 md:grid-cols-2">
+              <div className="grid gap-3 md:grid-cols-3">
                 <button
                   type="button"
                   onClick={() => setMode('single')}
@@ -486,6 +486,14 @@ export function ProcessingFlow() {
                 >
                   <p className="text-sm font-semibold text-slate-950">Multiple files</p>
                   <p className="mt-1 text-xs text-slate-600">Upload multiple files into one folder, then start together.</p>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => router.push('/imports/new')}
+                  className="rounded-xl border border-slate-200 bg-white p-4 text-left transition hover:border-emerald-300 hover:bg-emerald-50"
+                >
+                  <p className="text-sm font-semibold text-slate-950">Import from Confluence</p>
+                  <p className="mt-1 text-xs text-slate-600">Crawl a space or page tree into markdown jobs.</p>
                 </button>
               </div>
               <div className="grid gap-3 md:grid-cols-2">
