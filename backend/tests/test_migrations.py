@@ -1,4 +1,4 @@
-"""Verifies the 0004_auth migration's upgrade/downgrade round-trip.
+"""Verifies the 0004_auth and 0005_import migrations' upgrade/downgrade round-trips.
 
 0001_init / 0002_job_processing_info / 0002_add_password_protection use
 postgres-only DDL (`DO $$ ... END $$` blocks, native ENUM) and cannot be
@@ -173,3 +173,106 @@ def test_0004_auth_migration_upgrade_downgrade_round_trip(tmp_path, monkeypatch)
     tables = set(insp.get_table_names())
     for expected in ('teams', 'auth_providers', 'users', 'sessions', 'collections'):
         assert expected in tables
+
+
+def test_0005_import_migration_upgrade_downgrade_round_trip(tmp_path, monkeypatch) -> None:
+    db_path = tmp_path / 'migration_scratch_0005.db'
+    db_url = f'sqlite:///{db_path}'
+    monkeypatch.setattr(settings, 'database_url', db_url)
+
+    engine = create_engine(db_url, future=True)
+    _build_legacy_metadata().create_all(bind=engine)
+
+    cfg = _alembic_config()
+    command.stamp(cfg, '0003_job_markdown_versions')
+
+    # --- upgrade (through 0004 to 0005): import tables + jobs.import_run_id ---
+    command.upgrade(cfg, 'head')
+
+    insp = inspect(engine)
+    tables = set(insp.get_table_names())
+    for expected in ('import_sources', 'import_runs', 'job_artifacts'):
+        assert expected in tables, f'{expected} missing after upgrade'
+
+    source_columns = {c['name'] for c in insp.get_columns('import_sources')}
+    assert {
+        'id', 'owner_id', 'name', 'base_url', 'server_kind', 'api_base_path', 'auth_type',
+        'auth_username', 'credential_encrypted', 'last_validated_at', 'last_test_at',
+        'created_at', 'updated_at',
+    } <= source_columns
+    run_columns = {c['name'] for c in insp.get_columns('import_runs')}
+    assert {
+        'id', 'source_id', 'owner_id', 'kind', 'status', 'scope_type', 'scope_value',
+        'root_page_title', 'options', 'error_message', 'cancel_requested', 'chunk_seq',
+        'pages_discovered', 'pages_imported', 'pages_failed', 'attachments_saved',
+        'artifact_bytes', 'content_bytes', 'current_page_title', 'state',
+        'created_at', 'updated_at', 'started_at', 'finished_at',
+    } <= run_columns
+    artifact_columns = {c['name'] for c in insp.get_columns('job_artifacts')}
+    assert {
+        'id', 'job_id', 'kind', 'filename', 'content_type', 'content', 'size_bytes',
+        'source_url', 'sha256', 'created_at',
+    } <= artifact_columns
+
+    source_fks = insp.get_foreign_keys('import_sources')
+    assert any(
+        fk['referred_table'] == 'users' and fk['constrained_columns'] == ['owner_id'] for fk in source_fks
+    ), source_fks
+    run_fks = insp.get_foreign_keys('import_runs')
+    assert any(
+        fk['referred_table'] == 'import_sources' and fk['constrained_columns'] == ['source_id'] for fk in run_fks
+    ), run_fks
+    assert any(
+        fk['referred_table'] == 'users' and fk['constrained_columns'] == ['owner_id'] for fk in run_fks
+    ), run_fks
+    artifact_fks = insp.get_foreign_keys('job_artifacts')
+    assert any(
+        fk['referred_table'] == 'jobs' and fk['constrained_columns'] == ['job_id'] for fk in artifact_fks
+    ), artifact_fks
+
+    job_columns = {c['name'] for c in insp.get_columns('jobs')}
+    assert 'import_run_id' in job_columns
+    job_fks = insp.get_foreign_keys('jobs')
+    assert any(
+        fk['referred_table'] == 'import_runs' and fk['constrained_columns'] == ['import_run_id']
+        for fk in job_fks
+    ), job_fks
+    # The batch_alter_table rebuild must not have dropped 0004's FK.
+    assert any(
+        fk['referred_table'] == 'users' and fk['constrained_columns'] == ['owner_id'] for fk in job_fks
+    ), job_fks
+
+    assert 'ix_import_sources_owner_id' in {ix['name'] for ix in insp.get_indexes('import_sources')}
+    run_indexes = {ix['name'] for ix in insp.get_indexes('import_runs')}
+    assert {'ix_import_runs_owner_id', 'ix_import_runs_source_id'} <= run_indexes
+    assert 'ix_job_artifacts_job_id' in {ix['name'] for ix in insp.get_indexes('job_artifacts')}
+    jobs_indexes = {ix['name'] for ix in insp.get_indexes('jobs')}
+    assert {'ix_jobs_import_run_id', 'ix_jobs_owner_id'} <= jobs_indexes
+
+    artifact_uniques = insp.get_unique_constraints('job_artifacts')
+    assert any(
+        uc['name'] == 'uq_job_artifacts_job_id_filename' and set(uc['column_names']) == {'job_id', 'filename'}
+        for uc in artifact_uniques
+    ), artifact_uniques
+
+    # --- downgrade one revision: only the 0005 additions should disappear ---
+    command.downgrade(cfg, '0004_auth')
+
+    insp = inspect(engine)
+    tables = set(insp.get_table_names())
+    for removed in ('import_sources', 'import_runs', 'job_artifacts'):
+        assert removed not in tables, f'{removed} still present after downgrade'
+    job_columns = {c['name'] for c in insp.get_columns('jobs')}
+    assert 'import_run_id' not in job_columns
+    # 0004's schema must survive a 0005-only downgrade untouched.
+    assert 'owner_id' in job_columns
+    for kept in ('teams', 'auth_providers', 'users', 'sessions', 'collections'):
+        assert kept in tables, f'{kept} unexpectedly dropped by 0005 downgrade'
+
+    # --- re-upgrade: should cleanly re-apply from the 0004 baseline ---
+    command.upgrade(cfg, 'head')
+    insp = inspect(engine)
+    tables = set(insp.get_table_names())
+    for expected in ('import_sources', 'import_runs', 'job_artifacts'):
+        assert expected in tables
+    assert 'import_run_id' in {c['name'] for c in insp.get_columns('jobs')}

@@ -3,6 +3,7 @@ from datetime import date, datetime, time, timezone
 import io
 from pathlib import Path
 import shutil
+from urllib.parse import quote
 import zipfile
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Request, UploadFile, status
@@ -14,7 +15,7 @@ from sqlalchemy.orm import Session, defer
 from app.api.deps import get_current_user, require_admin
 from app.core.config import settings
 from app.database.session import get_db
-from app.models.models import Collection, Job, JobMarkdownVersion, JobStatus, Tag, User, UserRole
+from app.models.models import Collection, Job, JobArtifact, JobMarkdownVersion, JobStatus, Tag, User, UserRole
 from app.schemas.jobs import (
     ContainerState,
     CollectionCreateRequest,
@@ -39,6 +40,7 @@ from app.schemas.jobs import (
     RuntimeCapabilityInfo,
     UploadResponse,
 )
+from app.schemas.import_ import JobArtifactListResponse, JobArtifactResponse
 from app.services.paddle_service import (
     get_paddle_capabilities,
     get_paddle_settings,
@@ -61,6 +63,13 @@ _JOB_LIST_PAGE_LIMIT_MAX = 500
 # narrower options tuple instead.
 _JOB_BLOB_DEFER_OPTIONS = (defer(Job.upload_content), defer(Job.result_markdown))
 _JOB_DEFER_UPLOAD_CONTENT_ONLY = (defer(Job.upload_content),)
+# JobArtifact.content is BYTEA-sized; every listing query must defer it --
+# only the single-artifact content endpoint may load the blob.
+_ARTIFACT_BLOB_DEFER_OPTIONS = (defer(JobArtifact.content),)
+# Artifact content types allowed to render inline in the browser; everything
+# else (notably SVG, which is never stored as kind='image' anyway) is served
+# as an attachment download.
+_ARTIFACT_INLINE_CONTENT_TYPES = frozenset({'image/png', 'image/jpeg', 'image/gif', 'image/webp', 'application/pdf'})
 _LOWER_PROFILE_RETRY_MAP = {
     'ppocrv6_medium_structurev3': 'ppocrv6_small_structurev3',
     'ppocrv6_small_structurev3': 'ppocrv6_tiny_structurev3',
@@ -256,6 +265,25 @@ def _check_job_password(job: Job, password: str | None) -> None:
     
     if not verify_password(password, job.password_hash):
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail='Invalid password')
+
+
+def _is_import_page_job(job: Job) -> bool:
+    """True for jobs that ARE an imported Confluence page (settings.mode ==
+    'import'). Restarting one would wipe result_markdown -- the converted
+    page, unrecoverable short of re-running the whole import -- and feed the
+    stored export_view HTML into the OCR pipeline. 'import_attachment'
+    children deliberately do NOT match: re-OCRing their stored bytes through
+    the untouched pipeline is legitimate."""
+    info = job.processing_info if isinstance(job.processing_info, dict) else {}
+    settings_info = info.get('settings') if isinstance(info.get('settings'), dict) else {}
+    return settings_info.get('mode') == 'import'
+
+
+def _content_disposition(disposition: str, filename: str) -> str:
+    """RFC 6266/5987 Content-Disposition: ASCII-safe quoted fallback plus a
+    UTF-8 filename* parameter for everything else."""
+    fallback = ''.join(ch if 32 <= ord(ch) < 127 and ch not in '"\\' else '_' for ch in filename) or 'download'
+    return f'{disposition}; filename="{fallback}"; filename*=UTF-8\'\'{quote(filename, safe="")}'
 
 
 def _resolve_markdown_path(job: Job) -> Path:
@@ -525,7 +553,8 @@ def _database_size_bytes() -> int | None:
 def _estimate_database_payload_bytes(db: Session) -> int:
     upload_total = db.scalar(select(func.coalesce(func.sum(Job.upload_size_bytes), 0))) or 0
     markdown_total = db.scalar(select(func.coalesce(func.sum(func.length(Job.result_markdown)), 0))) or 0
-    return int(upload_total) + int(markdown_total)
+    artifact_total = db.scalar(select(func.coalesce(func.sum(JobArtifact.size_bytes), 0))) or 0
+    return int(upload_total) + int(markdown_total) + int(artifact_total)
 
 
 def _resolve_database_size_bytes(db: Session) -> int:
@@ -903,6 +932,8 @@ def restart_job(job_id: str, request: Request, db: Session = Depends(get_db), us
     if job is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail='Job not found')
     _require_visible(db, job, user)
+    if _is_import_page_job(job):
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail='Imported pages cannot be restarted')
 
     # Allow requeue for stale RUNNING records, but block truly active jobs.
     active_job_ids = _active_process_job_ids()
@@ -950,6 +981,8 @@ def retry_job_with_lower_profile(
     if job is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail='Job not found')
     _require_visible(db, job, user)
+    if _is_import_page_job(job):
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail='Imported pages cannot be restarted')
 
     active_job_ids = _active_process_job_ids()
     if job.status == JobStatus.RUNNING and job.id in active_job_ids:
@@ -1028,7 +1061,13 @@ def restart_folder(
     ]
 
     restarted = 0
+    skipped_import_jobs = 0
     for job in folder_jobs:
+        # Imported pages are skipped and reported rather than failing the
+        # whole folder: restarting them would bulk-wipe converted markdown.
+        if _is_import_page_job(job):
+            skipped_import_jobs += 1
+            continue
         if job.status == JobStatus.RUNNING and job.id in active_job_ids:
             continue
 
@@ -1057,7 +1096,7 @@ def restart_folder(
         restarted += 1
 
     db.commit()
-    return {'path': normalized, 'restarted_jobs': restarted}
+    return {'path': normalized, 'restarted_jobs': restarted, 'skipped_import_jobs': skipped_import_jobs}
 
 
 @router.get('/stats', response_model=DashboardStatsResponse)
@@ -1155,6 +1194,73 @@ def preview_markdown(
     if not path.exists():
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail='Preview not available')
     return PlainTextResponse(path.read_text(encoding='utf-8'))
+
+
+@router.get('/jobs/{job_id}/artifacts', response_model=JobArtifactListResponse)
+def list_job_artifacts(
+    job_id: str,
+    request: Request,
+    password: str | None = None,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+) -> JobArtifactListResponse:
+    enforce_rate_limit(request)
+
+    job = db.get(Job, job_id, options=list(_JOB_BLOB_DEFER_OPTIONS))
+    if job is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail='Job not found')
+    _require_visible(db, job, user)
+
+    # Same gate as /preview and /download: a password-protected job must not
+    # leak artifact filenames/types/sizes without the password.
+    _check_job_password(job, password)
+
+    artifacts = db.scalars(
+        select(JobArtifact)
+        .where(JobArtifact.job_id == job_id)
+        .order_by(JobArtifact.filename)
+        .options(*_ARTIFACT_BLOB_DEFER_OPTIONS)
+    ).all()
+    return JobArtifactListResponse(items=[JobArtifactResponse.model_validate(artifact) for artifact in artifacts])
+
+
+@router.get('/jobs/{job_id}/artifacts/{artifact_id}/content')
+def get_job_artifact_content(
+    job_id: str,
+    artifact_id: str,
+    request: Request,
+    password: str | None = None,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+) -> Response:
+    enforce_rate_limit(request)
+
+    job = db.get(Job, job_id, options=list(_JOB_BLOB_DEFER_OPTIONS))
+    if job is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail='Job not found')
+    _require_visible(db, job, user)
+    _check_job_password(job, password)
+
+    # The (artifact_id AND job_id) binding lives in the query itself: passing
+    # your own visible job_id plus a foreign artifact_id must 404, never
+    # return the foreign bytes (IDOR). Never load-by-id-then-check.
+    artifact = db.scalar(
+        select(JobArtifact).where(JobArtifact.id == artifact_id, JobArtifact.job_id == job_id)
+    )
+    if artifact is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail='Artifact not found')
+
+    disposition = 'inline' if artifact.content_type in _ARTIFACT_INLINE_CONTENT_TYPES else 'attachment'
+    return Response(
+        content=artifact.content,
+        # Our validated stored classification, never the remote's header.
+        media_type=artifact.content_type,
+        headers={
+            'Content-Disposition': _content_disposition(disposition, artifact.filename),
+            'X-Content-Type-Options': 'nosniff',
+            'Cache-Control': 'private, max-age=3600',
+        },
+    )
 
 
 @router.put('/jobs/{job_id}/save', response_model=JobSaveResponse)

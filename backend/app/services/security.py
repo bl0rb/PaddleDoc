@@ -198,16 +198,24 @@ def hash_session_token(token: str) -> str:
 # client secret rather than silently decrypting with the wrong key.
 
 _OIDC_CLIENT_SECRET_HKDF_INFO = b'oidc-client-secret'
+_IMPORT_CREDENTIAL_HKDF_INFO = b'import-source-credential'
 
 
-def _oidc_client_secret_fernet_key() -> bytes:
+def _derive_fernet_key(info: bytes) -> bytes:
+    """Derive a purpose-bound Fernet key from SECRET_KEY. The `info` label
+    separates key domains: an OIDC-secret key can never decrypt an import
+    credential and vice versa."""
     key_material = HKDF(
         algorithm=hashes.SHA256(),
         length=32,
         salt=None,
-        info=_OIDC_CLIENT_SECRET_HKDF_INFO,
+        info=info,
     ).derive(settings.secret_key.encode('utf-8'))
     return base64.urlsafe_b64encode(key_material)
+
+
+def _oidc_client_secret_fernet_key() -> bytes:
+    return _derive_fernet_key(_OIDC_CLIENT_SECRET_HKDF_INFO)
 
 
 def encrypt_client_secret(plaintext: str) -> str:
@@ -228,6 +236,32 @@ def decrypt_client_secret(ciphertext: str) -> str:
         return fernet.decrypt(ciphertext.encode('utf-8')).decode('utf-8')
     except InvalidToken as exc:
         raise ValueError('client secret could not be decrypted (wrong SECRET_KEY or corrupted value)') from exc
+
+
+# --- Confluence-import source credential encryption -------------------------
+#
+# Same Fernet-over-HKDF pattern as OIDC client secrets, under its own info
+# label. import_sources.credential_encrypted is write-only at the API; the
+# plaintext exists only inside the /test endpoint and the import worker task.
+
+def encrypt_import_credential(plaintext: str) -> str:
+    """Fernet-encrypt an import-source credential (Cloud API token or
+    Server/DC PAT) for storage in import_sources.credential_encrypted."""
+    fernet = Fernet(_derive_fernet_key(_IMPORT_CREDENTIAL_HKDF_INFO))
+    return fernet.encrypt(plaintext.encode('utf-8')).decode('utf-8')
+
+
+def decrypt_import_credential(ciphertext: str) -> str:
+    """Inverse of encrypt_import_credential.
+
+    Raises ValueError if the ciphertext is malformed/tampered, or was
+    encrypted under a different SECRET_KEY (e.g. after a key rotation).
+    """
+    fernet = Fernet(_derive_fernet_key(_IMPORT_CREDENTIAL_HKDF_INFO))
+    try:
+        return fernet.decrypt(ciphertext.encode('utf-8')).decode('utf-8')
+    except InvalidToken as exc:
+        raise ValueError('import credential could not be decrypted (wrong SECRET_KEY or corrupted value)') from exc
 
 
 # --- Short-lived signed cookie values (OIDC state/nonce/PKCE) --------------

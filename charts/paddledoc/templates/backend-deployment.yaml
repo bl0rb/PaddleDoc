@@ -90,6 +90,19 @@ spec:
             - name: MAX_UPLOAD_BYTES
               value: {{ .Values.backend.maxUploadBytes | quote }}
             {{- end }}
+            - name: IMPORT_ENABLED
+              value: {{ .Values.importer.enabled | quote }}
+            - name: IMPORT_PRIVATE_HOST_ALLOWLIST
+              value: {{ .Values.importer.privateHostAllowlist | toJson | quote }}
+            # int64: Helm parses large YAML numbers as float64 and | quote
+            # would render 20971520 as "2.097152e+07", which the app's int
+            # settings reject.
+            - name: IMPORT_MAX_PAGES
+              value: {{ .Values.importer.maxPages | int64 | quote }}
+            - name: IMPORT_ATTACHMENT_MAX_BYTES
+              value: {{ .Values.importer.attachmentMaxBytes | int64 | quote }}
+            - name: IMPORT_RUN_MAX_TOTAL_BYTES
+              value: {{ .Values.importer.runMaxTotalBytes | int64 | quote }}
           livenessProbe:
             httpGet:
               path: /api/v1/health

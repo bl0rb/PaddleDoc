@@ -67,6 +67,41 @@ class Settings(BaseSettings):
     # redirect_uri (`{public_api_url}/api/v1/auth/oidc/{slug}/callback`).
     public_api_url: str = 'http://localhost:8000'
 
+    # --- Confluence import (app/services/confluence*.py, safe_fetch,
+    # app/workers/import_tasks.py). The caps are hard server-side clamps:
+    # client-supplied values can only lower them, never raise them.
+    # Kill-switch: when False the /import API surface returns 404s.
+    import_enabled: bool = True
+    # Hostnames ('host' or 'host:port') of private-network Confluence servers
+    # outbound import fetches may reach. Passed into safe_fetch as
+    # allowed_private_hosts and enforced per redirect hop; cloud-metadata IPs
+    # remain blocked unconditionally, allowlist or not. JSON list env value
+    # (IMPORT_PRIVATE_HOST_ALLOWLIST), same parsing as cors_origins.
+    import_private_host_allowlist: list[str] = []
+    import_max_pages: int = 200
+    import_max_depth: int = 10
+    # Pages processed per chunked task execution before re-enqueueing, so
+    # queued OCR jobs can interleave with a long crawl.
+    import_chunk_pages: int = 25
+    import_fetch_timeout_seconds: int = 30
+    # safe_fetch max_bytes for JSON/HTML responses.
+    import_fetch_max_bytes: int = 5 * 1024 * 1024
+    # Per-attachment download cap; larger attachments are skipped, not fatal.
+    import_attachment_max_bytes: int = 20 * 1024 * 1024
+    # Cap on artifact_bytes + content_bytes accumulated by a single run
+    # (stored page HTML counts too); reaching it ends discovery gracefully.
+    import_run_max_total_bytes: int = 500 * 1024 * 1024
+    import_max_active_runs_per_user: int = 1
+    # A 'running' run whose updated_at is older than this is stale (worker
+    # lost) -- drives the lease reclaim, requeue-on-worker-ready, force-cancel
+    # and active-run-cap reaping paths.
+    import_stale_run_seconds: int = 600
+    # DB-backed cooldown between /import/sources/{id}/test probes (429 inside
+    # the window); holds even when the Redis rate limiter fails open.
+    import_test_cooldown_seconds: int = 10
+    # Per-process asyncio semaphore capping concurrent outbound test probes.
+    import_probe_concurrency: int = 4
+
 
 def _build_database_url(settings: Settings) -> str:
     if settings.database_url:

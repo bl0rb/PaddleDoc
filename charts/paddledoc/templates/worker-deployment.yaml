@@ -89,6 +89,23 @@ spec:
               value: {{ .Values.worker.celery.taskTimeLimitSeconds | quote }}
             - name: CELERY_BROKER_VISIBILITY_TIMEOUT_SECONDS
               value: {{ .Values.worker.celery.visibilityTimeoutSeconds | quote }}
+            # Confluence import: the crawl (and its outbound egress) runs on
+            # this worker, so it needs the same IMPORT_* settings as the
+            # backend. Credential decryption additionally relies on the
+            # SECRET_KEY env already set above.
+            - name: IMPORT_ENABLED
+              value: {{ .Values.importer.enabled | quote }}
+            - name: IMPORT_PRIVATE_HOST_ALLOWLIST
+              value: {{ .Values.importer.privateHostAllowlist | toJson | quote }}
+            # int64: Helm parses large YAML numbers as float64 and | quote
+            # would render 20971520 as "2.097152e+07", which the app's int
+            # settings reject.
+            - name: IMPORT_MAX_PAGES
+              value: {{ .Values.importer.maxPages | int64 | quote }}
+            - name: IMPORT_ATTACHMENT_MAX_BYTES
+              value: {{ .Values.importer.attachmentMaxBytes | int64 | quote }}
+            - name: IMPORT_RUN_MAX_TOTAL_BYTES
+              value: {{ .Values.importer.runMaxTotalBytes | int64 | quote }}
           resources:
             {{- toYaml .Values.worker.resources | nindent 12 }}
           volumeMounts:

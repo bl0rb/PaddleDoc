@@ -7,6 +7,7 @@ from app.api.auth import router_admin as auth_admin_router
 from app.api.auth import router_authenticated as auth_authenticated_router
 from app.api.auth import router_public as auth_public_router
 from app.api.deps import get_current_user, origin_guard
+from app.api.import_routes import router as import_router
 from app.api.routes import router
 from app.core.config import settings
 from app.schemas.jobs import HealthResponse
@@ -54,3 +55,7 @@ app.include_router(auth_admin_router)
 # per-row visibility scoping (owner/team) on top of this; this is just the
 # authentication gate itself.
 app.include_router(router, dependencies=[Depends(get_current_user), Depends(origin_guard)])
+
+# Confluence import surface (/api/v1/import/...): same session + CSRF gate as
+# the main router; the module itself adds the IMPORT_ENABLED kill-switch.
+app.include_router(import_router, dependencies=[Depends(get_current_user), Depends(origin_guard)])

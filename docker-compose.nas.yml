@@ -55,6 +55,15 @@ services:
       PUBLIC_API_URL: ${PUBLIC_API_URL:-http://localhost:8000}
       OPENAI_API_BASE_URL: ${OPENAI_API_BASE_URL:-}
       OPENAI_API_BEARER_TOKEN: ${OPENAI_API_BEARER_TOKEN:-}
+      # Confluence import. A NAS-hosted internal Confluence is the textbook
+      # allowlist use case: put its hostname (host or host:port) in
+      # IMPORT_PRIVATE_HOST_ALLOWLIST, e.g. '["wiki.local:8090"]' -- JSON
+      # list string, same convention as CORS_ORIGINS. Cloud
+      # (*.atlassian.net) needs no allowlist entry.
+      IMPORT_ENABLED: ${IMPORT_ENABLED:-true}
+      IMPORT_PRIVATE_HOST_ALLOWLIST: ${IMPORT_PRIVATE_HOST_ALLOWLIST:-[]}
+      IMPORT_MAX_PAGES: ${IMPORT_MAX_PAGES:-200}
+      IMPORT_ATTACHMENT_MAX_BYTES: ${IMPORT_ATTACHMENT_MAX_BYTES:-20971520}
     volumes:
       - ./nas-data/storage:/app/backend/storage:rw
     depends_on:
@@ -91,6 +100,12 @@ services:
       MALLOC_ARENA_MAX: ${MALLOC_ARENA_MAX:-2}
       OPENAI_API_BASE_URL: ${OPENAI_API_BASE_URL:-}
       OPENAI_API_BEARER_TOKEN: ${OPENAI_API_BEARER_TOKEN:-}
+      # Confluence import: the crawl runs on this worker, so it needs the
+      # same IMPORT_* settings as the backend (which only validates/tests).
+      IMPORT_ENABLED: ${IMPORT_ENABLED:-true}
+      IMPORT_PRIVATE_HOST_ALLOWLIST: ${IMPORT_PRIVATE_HOST_ALLOWLIST:-[]}
+      IMPORT_MAX_PAGES: ${IMPORT_MAX_PAGES:-200}
+      IMPORT_ATTACHMENT_MAX_BYTES: ${IMPORT_ATTACHMENT_MAX_BYTES:-20971520}
     volumes:
       - ./nas-data/storage:/app/backend/storage:rw
       - ./nas-data/paddlex_models:/root/.paddlex:rw

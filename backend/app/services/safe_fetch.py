@@ -26,6 +26,14 @@ Redirects are followed manually (stdlib http.client does not follow them)
 so each hop gets the same scheme + DNS + IP validation as the original
 request -- a 302 to a private address is exactly as dangerous as the
 original URL pointing there.
+
+Private targets can be selectively permitted via `allowed_private_hosts`
+(admin-managed, e.g. an internal Confluence for the importer). The grant is
+per-host, evaluated for EVERY redirect hop against that hop's hostname
+(and, for `host:port` entries, its effective port) -- an allowlisted host
+that redirects to a non-allowlisted private address is rejected at that
+hop. Cloud-metadata addresses are blocked unconditionally; no allowlist
+entry can override that.
 """
 
 from __future__ import annotations
@@ -39,6 +47,19 @@ from urllib.parse import urljoin, urlsplit
 
 _ALLOWED_SCHEMES = {'http', 'https'}
 _DEFAULT_PORTS = {'http': 80, 'https': 443}
+
+# Caller-supplied credential headers that must never travel to a different
+# origin than the one the caller addressed (see _strips_credentials).
+_SENSITIVE_HEADERS = frozenset({'authorization', 'proxy-authorization', 'cookie'})
+
+# Cloud-metadata endpoints (AWS/GCP/Azure link-local, AWS IPv6, Alibaba).
+# Blocked unconditionally -- the private-host allowlist never applies here,
+# even if one of these literals is added to it as an entry.
+_METADATA_NETWORKS = (
+    ipaddress.ip_network('169.254.169.254/32'),
+    ipaddress.ip_network('fd00:ec2::254/128'),
+    ipaddress.ip_network('100.100.100.200/32'),
+)
 
 
 class SafeFetchError(Exception):
@@ -55,17 +76,34 @@ class SafeFetchResponse:
     final_url: str
 
 
-def _is_blocked_ip(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
-    """True if `ip` is anything other than an ordinary public unicast
-    address: loopback (127/8, ::1), link-local (169.254/16, incl. the
-    169.254.169.254 cloud metadata address, and fe80::/10), private-use
-    (10/8, 172.16/12, 192.168/16), unique-local IPv6 (fc00::/7), multicast,
-    reserved, or unspecified (0.0.0.0, ::).
-    """
+def _canonical_ip(
+    ip: ipaddress.IPv4Address | ipaddress.IPv6Address,
+) -> ipaddress.IPv4Address | ipaddress.IPv6Address:
     # IPv4-mapped IPv6 (::ffff:10.0.0.1) must be evaluated against the
     # embedded IPv4 address, not as an opaque IPv6 address.
     if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped is not None:
-        ip = ip.ipv4_mapped
+        return ip.ipv4_mapped
+    return ip
+
+
+def _is_metadata_ip(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
+    """True if `ip` is a cloud-metadata address. Checked before (and
+    independently of) the private-host allowlist -- there is no override."""
+    ip = _canonical_ip(ip)
+    # ip_network.__contains__ returns False on version mismatch, so mixing
+    # the IPv4 and IPv6 networks in one loop is safe.
+    return any(ip in network for network in _METADATA_NETWORKS)
+
+
+def _is_blocked_ip(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
+    """True if `ip` is anything other than an ordinary public unicast
+    address: loopback (127/8, ::1), link-local (169.254/16 and fe80::/10),
+    private-use (10/8, 172.16/12, 192.168/16), unique-local IPv6
+    (fc00::/7), multicast, reserved, or unspecified (0.0.0.0, ::).
+    Metadata addresses are handled separately by `_is_metadata_ip`, which
+    runs first and is never allowlist-exempted.
+    """
+    ip = _canonical_ip(ip)
     return (
         ip.is_loopback
         or ip.is_link_local
@@ -76,13 +114,95 @@ def _is_blocked_ip(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
     )
 
 
-def resolve_and_pin(hostname: str) -> str:
+def _parse_allowlist_entry(entry: str) -> tuple[str, int | None] | None:
+    """Parse an allowlist entry into (hostname, port|None). Accepts
+    `host`, `host:port`, `[ipv6]`, `[ipv6]:port`, and a bare IPv6 literal
+    (treated as host-only). Returns None for malformed entries -- a bad
+    entry must never widen the allowlist."""
+    entry = entry.strip().lower()
+    if not entry:
+        return None
+    if entry.startswith('['):
+        host, bracket, rest = entry[1:].partition(']')
+        if not bracket or not host:
+            return None
+        if not rest:
+            return (host, None)
+        if rest.startswith(':') and rest[1:].isdigit():
+            return (host, int(rest[1:]))
+        return None
+    if entry.count(':') == 1:
+        host, _, port_str = entry.partition(':')
+        if host and port_str.isdigit():
+            return (host, int(port_str))
+        return None
+    if ':' in entry:
+        # Unbracketed IPv6 literal -- the colons are part of the address.
+        return (entry, None)
+    return (entry, None)
+
+
+def _credential_origin(url: str) -> tuple[str, str, int | None]:
+    parts = urlsplit(url)
+    scheme = parts.scheme.lower()
+    return scheme, (parts.hostname or '').lower(), parts.port or _DEFAULT_PORTS.get(scheme)
+
+
+def _strips_credentials(
+    origin: tuple[str, str, int | None], next_origin: tuple[str, str, int | None]
+) -> bool:
+    """True when a redirect hop to `next_origin` must not carry the caller's
+    credential headers: any host change, any https->http downgrade, any port
+    change. The single exception (mirroring requests/httpx semantics) is a
+    clean same-host http->https upgrade on the default ports."""
+    scheme, host, port = origin
+    next_scheme, next_host, next_port = next_origin
+    if host != next_host:
+        return True
+    if scheme == next_scheme and port == next_port:
+        return False
+    if scheme == 'http' and next_scheme == 'https' and port == 80 and next_port == 443:
+        return False
+    return True
+
+
+def _matches_private_host_allowlist(
+    hostname: str,
+    port: int | None,
+    allowed_private_hosts: frozenset[str],
+) -> bool:
+    """True if `hostname` matches an allowlist entry. Exact case-insensitive
+    hostname comparison only -- no wildcards, no suffix matching. A bare
+    `host` entry matches any port; a `host:port` entry requires that exact
+    effective port."""
+    host = hostname.lower()
+    for raw_entry in allowed_private_hosts:
+        parsed = _parse_allowlist_entry(raw_entry)
+        if parsed is None:
+            continue
+        entry_host, entry_port = parsed
+        if entry_host == host and (entry_port is None or entry_port == port):
+            return True
+    return False
+
+
+def resolve_and_pin(
+    hostname: str,
+    *,
+    port: int | None = None,
+    allowed_private_hosts: frozenset[str] | None = None,
+) -> str:
     """Resolve `hostname` via DNS and return a single validated IP to
     connect to.
 
     Rejects the hostname outright if ANY resolved address is blocked, not
     just the first -- a host with mixed public/private A/AAAA records could
     otherwise pass validation on one lookup and connect via another.
+
+    `allowed_private_hosts` (`host` or `host:port` entries, matched against
+    `hostname` and the effective `port`) exempts this host from the
+    private/loopback/link-local/ULA block. Cloud-metadata addresses are
+    rejected before the allowlist is consulted and cannot be exempted.
     """
     try:
         addr_infos = socket.getaddrinfo(hostname, None)
@@ -101,9 +221,13 @@ def resolve_and_pin(hostname: str) -> str:
     if not resolved_ips:
         raise SafeFetchError(f'DNS resolution for {hostname!r} returned no addresses')
 
+    allowlisted = _matches_private_host_allowlist(hostname, port, allowed_private_hosts or frozenset())
+
     for ip_str in resolved_ips:
         ip = ipaddress.ip_address(ip_str)
-        if _is_blocked_ip(ip):
+        if _is_metadata_ip(ip):
+            raise SafeFetchError(f'{hostname!r} resolves to a cloud metadata address ({ip_str})')
+        if _is_blocked_ip(ip) and not allowlisted:
             raise SafeFetchError(f'{hostname!r} resolves to a blocked address ({ip_str})')
 
     return resolved_ips[0]
@@ -143,6 +267,7 @@ def _single_request(
     timeout: float,
     max_bytes: int,
     body: bytes | None = None,
+    allowed_private_hosts: frozenset[str] = frozenset(),
 ) -> tuple[int, dict[str, str], bytes, str | None]:
     parts = urlsplit(url)
     scheme = parts.scheme.lower()
@@ -153,7 +278,9 @@ def _single_request(
 
     hostname = parts.hostname
     port = parts.port or _DEFAULT_PORTS[scheme]
-    pinned_ip = resolve_and_pin(hostname)
+    # Allowlist evaluated here, per hop, against THIS hop's hostname:port --
+    # a redirect off an allowlisted host gets no inherited exemption.
+    pinned_ip = resolve_and_pin(hostname, port=port, allowed_private_hosts=allowed_private_hosts)
 
     path = parts.path or '/'
     if parts.query:
@@ -197,6 +324,7 @@ def safe_fetch(
     timeout: float = 5.0,
     max_redirects: int = 5,
     max_bytes: int = 2 * 1024 * 1024,
+    allowed_private_hosts: frozenset[str] | None = None,
 ) -> SafeFetchResponse:
     """Fetch `url`, following redirects manually (each hop re-validated),
     with total size and per-request timeout caps.
@@ -205,12 +333,25 @@ def safe_fetch(
     unchanged on 307/308 redirects and dropped when a 303 downgrades the
     request to GET, per RFC 7231 redirect semantics.
 
+    `allowed_private_hosts` (`host` or `host:port` entries) exempts matching
+    hosts from the private-address block, re-evaluated for every redirect
+    hop; cloud-metadata addresses stay blocked regardless. Default
+    None/empty keeps today's public-internet-only behavior.
+
     Raises SafeFetchError for anything unsafe or over-cap; never silently
     truncates or downgrades a rejection into a partial success.
     """
     current_url = url
-    request_headers = headers or {}
+    request_headers = dict(headers or {})
     request_body = body
+    private_hosts = allowed_private_hosts or frozenset()
+    # Credential containment across redirects: caller-supplied Authorization/
+    # Cookie headers are only valid for the origin the caller addressed. Any
+    # hop off that origin (other host, other port, https->http downgrade)
+    # drops them permanently for the rest of the chain -- otherwise a hostile
+    # or compromised server could bounce the credential to a third party (or
+    # onto cleartext http) via a 3xx Location.
+    origin = _credential_origin(url)
 
     for _hop in range(max_redirects + 1):
         status_code, response_headers, response_body, location = _single_request(
@@ -220,6 +361,7 @@ def safe_fetch(
             timeout=timeout,
             max_bytes=max_bytes,
             body=request_body,
+            allowed_private_hosts=private_hosts,
         )
 
         if status_code in (301, 302, 303, 307, 308) and location:
@@ -227,6 +369,12 @@ def safe_fetch(
             if status_code == 303:
                 method = 'GET'
                 request_body = None
+            if _strips_credentials(origin, _credential_origin(current_url)):
+                request_headers = {
+                    key: value
+                    for key, value in request_headers.items()
+                    if key.lower() not in _SENSITIVE_HEADERS
+                }
             continue
 
         return SafeFetchResponse(

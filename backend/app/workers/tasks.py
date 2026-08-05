@@ -9,7 +9,7 @@ from sqlalchemy import select, update
 
 from app.core.config import settings
 from app.database.session import SessionLocal
-from app.models.models import Job, JobStatus
+from app.models.models import ImportRun, ImportRunStatus, Job, JobStatus
 from app.services.paddle_service import (
     convert_to_markdown_with_details,
     get_paddle_settings,
@@ -116,16 +116,39 @@ def requeue_running_jobs_after_restart() -> int:
     """
     db = SessionLocal()
     to_restart: list[tuple[str, str | None, str | None, str | None, str | None]] = []
+    runs_to_requeue: list[tuple[str, int]] = []
+    stale_run_cutoff = datetime.now(timezone.utc) - timedelta(seconds=settings.import_stale_run_seconds)
     try:
+        # Import runs whose worker died without redelivery (hard-limit kill /
+        # lost message): stale 'running' runs are replayed with their previous
+        # chunk_seq -- the stale-lease reclaim in import_confluence makes that
+        # safe, and a live run's fresh heartbeat makes the replay a no-op.
+        # Stale 'pending' runs (creation message lost / send_task failed --
+        # their updated_at is the creation time, untouched until the first
+        # claim) are replayed with their CURRENT seq: the normal claim path
+        # accepts pending status directly, and its chunk_seq guard makes a
+        # duplicate creation message a no-op.
+        stale_runs = db.scalars(
+            select(ImportRun)
+            .where(ImportRun.status.in_([ImportRunStatus.PENDING, ImportRunStatus.RUNNING]))
+            .where(ImportRun.updated_at < stale_run_cutoff)
+        ).all()
+        runs_to_requeue = [
+            (run.id, run.chunk_seq if run.status == ImportRunStatus.PENDING else run.chunk_seq - 1)
+            for run in stale_runs
+        ]
+
         running_jobs = db.scalars(select(Job).where(Job.status == JobStatus.RUNNING)).all()
         for job in running_jobs:
             info = job.processing_info if isinstance(job.processing_info, dict) else {}
-            settings = info.get('settings') if isinstance(info.get('settings'), dict) else {}
+            # Named job_settings (not `settings`): shadowing the module-level
+            # settings would make the cutoff computation above an UnboundLocalError.
+            job_settings = info.get('settings') if isinstance(info.get('settings'), dict) else {}
 
-            profile_id = settings.get('profile_id') if isinstance(settings.get('profile_id'), str) else None
-            mode = settings.get('mode') if isinstance(settings.get('mode'), str) else None
-            email = settings.get('email') if isinstance(settings.get('email'), str) else None
-            department = settings.get('department') if isinstance(settings.get('department'), str) else None
+            profile_id = job_settings.get('profile_id') if isinstance(job_settings.get('profile_id'), str) else None
+            mode = job_settings.get('mode') if isinstance(job_settings.get('mode'), str) else None
+            email = job_settings.get('email') if isinstance(job_settings.get('email'), str) else None
+            department = job_settings.get('department') if isinstance(job_settings.get('department'), str) else None
 
             execution = info.get('execution') if isinstance(info.get('execution'), dict) else {}
             info['execution'] = {
@@ -136,7 +159,7 @@ def requeue_running_jobs_after_restart() -> int:
 
             job.processing_info = {
                 **info,
-                'settings': settings,
+                'settings': job_settings,
             }
             job.status = JobStatus.PENDING
             job.error_message = None
@@ -152,7 +175,14 @@ def requeue_running_jobs_after_restart() -> int:
     for job_id, profile_id, mode, email, department in to_restart:
         process_job.delay(job_id, profile_id, mode, email, department)
 
-    return len(to_restart)
+    for run_id, replay_seq in runs_to_requeue:
+        # By name so this module keeps zero imports from import_tasks at call
+        # time; running runs replay with the PREVIOUS seq (reclaim path),
+        # pending runs with their current seq (normal claim path).
+        celery_app.send_task('import_confluence', args=[run_id, replay_seq])
+        logger.warning('Requeued stale import run %s at chunk_seq %s', run_id, replay_seq)
+
+    return len(to_restart) + len(runs_to_requeue)
 
 
 @worker_ready.connect
@@ -341,3 +371,8 @@ def probe_paddle() -> dict[str, str | None]:
         'detail': 'PaddleOCR package not available in worker image',
         **get_runtime_capability(),
     }
+
+
+# The worker entrypoint is `celery -A app.workers.tasks`, so any task module
+# must be imported from here to register with the app.
+import app.workers.import_tasks  # noqa: E402,F401  (registers import_confluence)

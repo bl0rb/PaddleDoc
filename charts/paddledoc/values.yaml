@@ -126,6 +126,29 @@ worker:
     # means unlimited (no sizeLimit is rendered on the emptyDir).
     sizeLimit: ""
 
+# Confluence -> Markdown import. Wired as IMPORT_* env vars into BOTH the
+# backend (validates sources, runs synchronous test probes) and the worker
+# (performs the crawl -- import egress originates from worker pods: Cloud
+# Confluence needs NAT egress to *.atlassian.net:443; an internal Server/DC
+# instance needs pod-network reachability plus an allowlist entry below).
+importer:
+  # Kill-switch; when false the /import API surface returns 404s.
+  enabled: true
+  # Hostnames ("host" or "host:port") of private-network Confluence servers
+  # import fetches may reach, e.g. ["confluence.corp.internal:8090"].
+  # Enforced per redirect hop inside the backend's SSRF-safe fetcher;
+  # cloud-metadata IPs stay blocked unconditionally. Rendered as a JSON list
+  # into IMPORT_PRIVATE_HOST_ALLOWLIST.
+  privateHostAllowlist: []
+  # Hard server-side clamp on pages per run (clients can only go lower).
+  maxPages: 200
+  # Per-attachment download cap in bytes (default 20 MiB).
+  attachmentMaxBytes: 20971520
+  # Cap in bytes on stored page HTML + artifacts per run (default 500 MiB).
+  # Import-heavy installs inflate the database (artifacts and page HTML are
+  # stored as BYTEA rows) -- watch DB volume/backup sizing accordingly.
+  runMaxTotalBytes: 524288000
+
 auth:
   # SECRET_KEY signs session cookies and the OIDC state cookie, and derives
   # the key used to encrypt stored OIDC provider client secrets. Required by
