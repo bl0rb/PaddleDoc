@@ -12,6 +12,16 @@ metadata:
     app.kubernetes.io/component: worker
 spec:
   replicas: {{ ternary .Values.autoscaling.worker.minReplicas .Values.worker.replicaCount .Values.autoscaling.worker.enabled }}
+  {{- if .Values.worker.updateStrategy }}
+  strategy:
+    {{- toYaml .Values.worker.updateStrategy | nindent 4 }}
+  {{- else if and .Values.worker.modelCache.enabled .Values.worker.modelCache.persistence.enabled (not (has "ReadWriteMany" .Values.worker.modelCache.persistence.accessModes)) }}
+  # With a ReadWriteOnce model-cache PVC the default RollingUpdate wedges
+  # upgrades on attach-limited storage (EBS): the surge pod on another node
+  # can never attach the volume, so the old pod is never terminated.
+  strategy:
+    type: Recreate
+  {{- end }}
   selector:
     matchLabels:
       {{- include "paddledoc.selectorLabels" . | nindent 6 }}
@@ -106,6 +116,9 @@ spec:
               value: {{ .Values.importer.attachmentMaxBytes | int64 | quote }}
             - name: IMPORT_RUN_MAX_TOTAL_BYTES
               value: {{ .Values.importer.runMaxTotalBytes | int64 | quote }}
+            {{- with .Values.worker.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
           resources:
             {{- toYaml .Values.worker.resources | nindent 12 }}
           volumeMounts:
@@ -127,12 +140,17 @@ spec:
           {{- end }}
         {{- if .Values.worker.modelCache.enabled }}
         - name: model-cache
+          {{- if .Values.worker.modelCache.persistence.enabled }}
+          persistentVolumeClaim:
+            claimName: {{ default (printf "%s-worker-model-cache" (include "paddledoc.fullname" .)) .Values.worker.modelCache.persistence.existingClaim }}
+          {{- else }}
           emptyDir:
             {{- if .Values.worker.modelCache.sizeLimit }}
             sizeLimit: {{ .Values.worker.modelCache.sizeLimit }}
             {{- else }}
             {}
             {{- end }}
+          {{- end }}
         {{- end }}
       {{- with .Values.worker.nodeSelector }}
       nodeSelector:

@@ -159,6 +159,38 @@ path so model downloads succeed:
   your own writable `$HOME` some other way.
 - `worker.modelCache.sizeLimit` (default `""`, unlimited) sets the
   `emptyDir.sizeLimit`; leave empty to let the node decide.
+- `worker.modelCache.persistence.enabled` (default `false`) backs the model
+  cache with a PVC (`<release>-worker-model-cache`, or
+  `worker.modelCache.persistence.existingClaim`) instead of the `emptyDir`.
+  Without it, every pod restart/rollout/scale-up starts with an empty cache
+  and re-downloads all model weights from the internet — on clusters with
+  restricted egress that download fails and jobs silently degrade to the
+  plain-text fallback (no OCR runs; the job detail page shows a fallback
+  warning). `worker.modelCache.persistence.storageClassName`,
+  `accessModes` (default `ReadWriteOnce`) and `size` (default `10Gi`) mirror
+  the shared-storage `persistence.*` values. `sizeLimit` is ignored in PVC
+  mode. With more than one worker replica the accessModes must be
+  `ReadWriteMany` — with `ReadWriteOnce`, replicas scheduled to other nodes
+  fail to attach the volume and never start.
+- When the model-cache PVC has no `ReadWriteMany` access mode, the chart
+  defaults the worker Deployment to `strategy: Recreate` — the default
+  RollingUpdate would wedge image upgrades on attach-limited storage (EBS):
+  the surge pod on another node can never attach the volume, so the old pod
+  is never terminated. Set `worker.updateStrategy` to override (it is
+  rendered verbatim as `spec.strategy`).
+- `ReadWriteMany` caveats: common RWX providers (e.g. AWS EFS) ignore
+  `fsGroup`, so a fresh volume rooted `root:root` is not writable by the
+  uid-1000 worker — provision storage writable by uid/gid 1000 (e.g. an EFS
+  access point). And since the PVC is the workers' shared `$HOME`, several
+  replicas hitting a cold cache download the same model archives
+  concurrently without coordination — warm the cache with one replica
+  before scaling up.
+
+If the cluster cannot reach the public model hosts directly, use
+`worker.extraEnv` to route the download through a proxy
+(`HTTP_PROXY`/`HTTPS_PROXY`/`NO_PROXY`) or switch the model source
+(`PADDLE_PDX_MODEL_SOURCE`, e.g. `HuggingFace`); the entries are rendered
+verbatim into the worker container's `env`.
 
 This volume is independent of `persistence.enabled` (which controls the
 shared `/app/backend/storage` PVC) — it is added whenever
@@ -334,6 +366,13 @@ The following list contains all configurable parameters currently supported by t
 | `worker.containerSecurityContext` | map | `{allowPrivilegeEscalation: false, capabilities: {drop: [ALL]}}` |
 | `worker.modelCache.enabled` | bool | `true` |
 | `worker.modelCache.sizeLimit` | string | `""` |
+| `worker.modelCache.persistence.enabled` | bool | `false` |
+| `worker.modelCache.persistence.storageClassName` | string | `""` |
+| `worker.modelCache.persistence.accessModes` | list | `[ReadWriteOnce]` |
+| `worker.modelCache.persistence.size` | string | `10Gi` |
+| `worker.modelCache.persistence.existingClaim` | string | `""` |
+| `worker.updateStrategy` | map | `{}` |
+| `worker.extraEnv` | list | `[]` |
 | `worker.celery.taskSoftTimeLimitSeconds` | int | `1500` |
 | `worker.celery.taskTimeLimitSeconds` | int | `1800` |
 | `worker.celery.visibilityTimeoutSeconds` | int | `1800` |

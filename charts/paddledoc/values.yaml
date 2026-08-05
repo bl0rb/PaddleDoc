@@ -123,8 +123,46 @@ worker:
   modelCache:
     enabled: true
     # Maximum size of the emptyDir model cache (e.g. "10Gi"). Empty string
-    # means unlimited (no sizeLimit is rendered on the emptyDir).
+    # means unlimited (no sizeLimit is rendered on the emptyDir). Ignored
+    # when persistence.enabled is true.
     sizeLimit: ""
+    # Back the model cache with a PVC instead of an emptyDir. Without this,
+    # every pod restart/rollout/scale-up starts with an empty cache and must
+    # re-download all model weights from the internet -- on clusters with
+    # restricted egress that download fails and jobs silently degrade to the
+    # plain-text fallback (no OCR). With more than one worker replica the
+    # accessModes must be ReadWriteMany (like the shared-storage PVC): with
+    # ReadWriteOnce, replicas scheduled to other nodes fail to attach the
+    # volume and never start. When accessModes has no ReadWriteMany entry the
+    # chart also defaults the Deployment to strategy Recreate (see
+    # worker.updateStrategy) so image upgrades cannot wedge on the volume
+    # attachment. Note that common ReadWriteMany providers (e.g. AWS EFS)
+    # ignore fsGroup -- provision storage whose root is writable by uid/gid
+    # 1000 (e.g. an EFS access point), or the model download fails and jobs
+    # degrade to the plain-text fallback again.
+    persistence:
+      enabled: false
+      storageClassName: ""
+      accessModes:
+        - ReadWriteOnce
+      size: 10Gi
+      # Use a pre-existing PVC instead of creating one.
+      existingClaim: ""
+  # Deployment update strategy (rendered verbatim as spec.strategy). Empty
+  # map means: Kubernetes default (RollingUpdate), except when the model
+  # cache uses a PVC without ReadWriteMany -- then the chart falls back to
+  # Recreate to avoid rollouts deadlocking on the volume attachment.
+  updateStrategy: {}
+  # Extra environment variables for the worker container, rendered verbatim.
+  # Typical uses: route the runtime model download through a corporate proxy
+  # (HTTP_PROXY/HTTPS_PROXY/NO_PROXY) or point PaddleX at an alternative
+  # model source/mirror (PADDLE_PDX_MODEL_SOURCE, e.g. "BOS" or "HuggingFace").
+  # extraEnv:
+  #   - name: HTTPS_PROXY
+  #     value: http://proxy.corp.internal:3128
+  #   - name: PADDLE_PDX_MODEL_SOURCE
+  #     value: HuggingFace
+  extraEnv: []
 
 # Confluence -> Markdown import. Wired as IMPORT_* env vars into BOTH the
 # backend (validates sources, runs synchronous test probes) and the worker
