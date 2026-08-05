@@ -45,6 +45,15 @@ services:
     depends_on:
       - postgres
       - redis
+    # /health only answers once the entrypoint's `alembic upgrade head` has
+    # completed -- the worker gates on this (service_healthy below) so its
+    # startup recovery query never races an unmigrated schema.
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/v1/health', timeout=3)"]
+      interval: 5s
+      timeout: 5s
+      retries: 36
+      start_period: 10s
 
   worker:
     build:
@@ -87,8 +96,10 @@ services:
       - ./backend/storage:/app/backend/storage
       - paddlex_models:/root/.paddlex
     depends_on:
-      - backend
-      - redis
+      backend:
+        condition: service_healthy
+      redis:
+        condition: service_started
 
   postgres:
     image: postgres:16
