@@ -224,6 +224,10 @@ Since v1.1.0 the API requires a session: create a dedicated PaddleDoc user for n
 
 ## Deployment and Runtime Notes
 
+Firewall rules for restricted networks: see
+[docs/firewall-requirements.md](docs/firewall-requirements.md) for the full
+inbound/outbound connection matrix per component.
+
 ### Architecture
 
 ```text
