@@ -12,27 +12,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `worker_log_entries` Postgres table (portable — no docker.sock; identical under Compose
   and Helm/EKS), exposed via the admin-only endpoint `GET /api/v1/auth/admin/worker-logs`
   with level/worker/text/time filters and pagination, and a terminal-style "Logs" tab at
-  Admin → Logs with auto-refresh, expandable tracebacks, and "load older" paging
+  Admin → Logs with auto-refresh, expandable tracebacks, and "load older" paging (#57)
 - New worker tunables `WORKER_LOG_CAPTURE_LEVEL` (default `INFO`, genuinely independent of
   the worker `--loglevel` — console verbosity is unaffected) and
-  `WORKER_LOG_RETENTION_MAX_ROWS` (default 20000), in compose env and Helm values
+  `WORKER_LOG_RETENTION_MAX_ROWS` (default 20000), in compose env and Helm values (#57)
 
 ### Changed
 - The sidebar is now a permanently visible rail on desktop viewports (≥1024px); small
-  screens keep the burger-toggled drawer
+  screens keep the burger-toggled drawer (#57)
 - Snappier navigation: a dependency-free stale-while-revalidate cache renders Home, Tasks,
   and Processing instantly from cached data and refreshes in the background; polling is
   adaptive (fast only while jobs are pending/running) and pauses while the tab is hidden;
   the job detail page lazy-loads the markdown renderer and shows loading skeletons instead
-  of blank states
+  of blank states (#57)
 - The dashboard degrades honestly when the backend becomes unreachable: service status,
   stats, and job state are marked as "last known" instead of continuing to display the
-  pre-outage values as current
+  pre-outage values as current (#57)
 
 ### Fixed
-- The delete-confirmation modal could render beneath the (now permanent) sidebar on desktop
+- The delete-confirmation modal could render beneath the (now permanent) sidebar on desktop (#57)
 - Filter "Reset" buttons (document list, admin logs) fetched with the pre-reset filter
-  values due to a stale closure, leaving the list filtered while the inputs showed cleared
+  values due to a stale closure, leaving the list filtered while the inputs showed cleared (#57)
 
 ## [1.2.0] - 2026-08-05
 
