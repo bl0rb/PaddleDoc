@@ -25,12 +25,18 @@ jobs:
             exit 0
           fi
 
+          # Hyphenated tags (e.g. v1.2.1-rc.1) are semver pre-releases
+          prerelease=()
+          case "$GITHUB_REF_NAME" in
+            *-*) prerelease=(--prerelease) ;;
+          esac
+
           # For annotated tags, keep the hand-written tag message as the release
           # body intro; --generate-notes appends the auto-generated notes to it.
           tag_object="$(gh api "repos/${GH_REPO}/git/ref/tags/${GITHUB_REF_NAME}" --jq '.object.type + " " + .object.sha')"
           if [ "${tag_object%% *}" = "tag" ]; then
             tag_message="$(gh api "repos/${GH_REPO}/git/tags/${tag_object#tag }" --jq '.message')"
-            gh release create "$GITHUB_REF_NAME" --verify-tag --generate-notes --notes "$tag_message"
+            gh release create "$GITHUB_REF_NAME" --verify-tag --generate-notes --notes "$tag_message" "${prerelease[@]}"
           else
-            gh release create "$GITHUB_REF_NAME" --verify-tag --generate-notes
+            gh release create "$GITHUB_REF_NAME" --verify-tag --generate-notes "${prerelease[@]}"
           fi

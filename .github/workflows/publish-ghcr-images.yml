@@ -74,7 +74,8 @@ jobs:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_OWNER }}/paddledoc-${{ matrix.name }}
           tags: |
             type=raw,value=${{ steps.tag.outputs.value }}
-            type=raw,value=latest
+            # Pre-release tags (anything with a hyphen, e.g. 1.2.1-rc.1) must not move latest
+            type=raw,value=latest,enable=${{ !contains(steps.tag.outputs.value, '-') }}
 
       - name: Build and push image
         uses: docker/build-push-action@v7
