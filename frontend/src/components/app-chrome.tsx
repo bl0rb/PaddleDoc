@@ -29,7 +29,7 @@ function ProtectedShell({ children }: { children: React.ReactNode }) {
   return (
     <>
       <SidebarNav />
-      {children}
+      <div className="lg:pl-64">{children}</div>
     </>
   );
 }

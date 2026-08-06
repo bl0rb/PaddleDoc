@@ -437,3 +437,35 @@ class JobArtifact(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
 
     job: Mapped[Job] = relationship(back_populates='artifacts')
+
+
+class WorkerLogEntry(Base):
+    """A single Celery worker log record, mirrored here by
+    app.workers.log_capture.WorkerLogDBHandler so the admin UI can tail
+    worker container logs without docker.sock/kubectl access -- the EKS/k8s
+    deployment runs the worker as a Deployment with N replicas + an HPA (see
+    charts/paddledoc/templates/worker-deployment.yaml), so there is no
+    single node-local log file to read either, and compose has no shared
+    volume mounted read-only into the backend for the same purpose.
+
+    Retention is a row-count cap (settings.worker_log_retention_max_rows),
+    pruned opportunistically by the handler itself on write -- there is no
+    beat/cron worker in this deployment to run a scheduled prune job.
+    """
+
+    __tablename__ = 'worker_log_entries'
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False, index=True
+    )
+    level: Mapped[str] = mapped_column(String(16), nullable=False, index=True)  # DEBUG/INFO/WARNING/ERROR/CRITICAL
+    logger_name: Mapped[str] = mapped_column(String(255), nullable=False)
+    # Container/pod hostname (socket.gethostname()) -- unique per worker
+    # replica in the k8s Deployment; stable for the container's lifetime in
+    # compose, changes across a restart.
+    worker_name: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
+    task_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    task_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    message: Mapped[str] = mapped_column(Text, nullable=False)
+    exc_text: Mapped[str | None] = mapped_column(Text, nullable=True)

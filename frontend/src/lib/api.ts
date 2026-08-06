@@ -123,3 +123,33 @@ export async function apiJson<T>(path: string, init?: ApiFetchInit): Promise<T> 
 
   return (await res.json()) as T;
 }
+
+/** Filter value for GET /api/v1/auth/admin/worker-logs — acts as a floor (e.g. WARNING also returns ERROR/CRITICAL). */
+export type LogLevel = 'DEBUG' | 'INFO' | 'WARNING' | 'ERROR' | 'CRITICAL';
+
+/**
+ * WorkerLogEntry from the backend (GET /api/v1/auth/admin/worker-logs).
+ * `level` is not DB-enum-constrained on the backend — treat it as a plain
+ * string when rendering (values outside {@link LogLevel} are possible).
+ */
+export interface WorkerLogEntry {
+  id: string;
+  created_at: string; // ISO 8601
+  level: string;
+  logger_name: string;
+  worker_name: string;
+  /** Null for log lines emitted outside a running Celery task. */
+  task_id: string | null;
+  task_name: string | null;
+  /** Hard server-side truncation at 4000 chars. */
+  message: string;
+  /** Full traceback when the record carried exception info; hard truncation at 8000 chars. */
+  exc_text: string | null;
+}
+
+/** GET /api/v1/auth/admin/worker-logs */
+export interface WorkerLogsResponse {
+  items: WorkerLogEntry[];
+  /** Total rows matching the filters, ignoring limit/offset. */
+  total: number;
+}

@@ -17,6 +17,7 @@ from app.models.models import (
     Team,
     User,
     UserRole,
+    WorkerLogEntry,
 )
 
 __all__ = [
@@ -38,4 +39,5 @@ __all__ = [
     'Team',
     'User',
     'UserRole',
+    'WorkerLogEntry',
 ]

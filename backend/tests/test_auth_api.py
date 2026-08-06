@@ -19,7 +19,7 @@ from sqlalchemy import select
 
 import app.api.auth as auth_module
 from app.main import app
-from app.models.models import AuthProvider, Job, JobStatus, Session as SessionModel, User, UserRole
+from app.models.models import AuthProvider, Job, JobStatus, Session as SessionModel, User, UserRole, WorkerLogEntry
 from app.services.security import encrypt_client_secret, hash_password, rate_limiter
 from conftest import TestingSessionLocal
 
@@ -489,3 +489,61 @@ def test_oidc_callback_rejects_idp_initiated_login(client: TestClient) -> None:
 def test_oidc_authorize_unknown_provider_404(client: TestClient) -> None:
     resp = client.get('/api/v1/auth/oidc/does-not-exist/authorize', follow_redirects=False)
     assert resp.status_code == 404
+
+
+# --- admin: worker logs -------------------------------------------------------
+
+def test_admin_worker_logs_endpoint_requires_admin_role(client: TestClient) -> None:
+    _create_user(username='plainuser2', email='plainuser2@example.com', password='CorrectHorse1', role=UserRole.USER)
+    _login(client, 'plainuser2', 'CorrectHorse1')
+
+    resp = client.get('/api/v1/auth/admin/worker-logs')
+    assert resp.status_code == 403
+
+
+def test_admin_worker_logs_filters_by_level_floor_and_worker(client: TestClient) -> None:
+    _create_user(username='logsadmin', email='logsadmin@example.com', password='CorrectHorse1', role=UserRole.ADMIN)
+    db = _db()
+    try:
+        db.add_all([
+            WorkerLogEntry(
+                level='INFO', logger_name='app.workers.tasks', worker_name='worker-a',
+                message='Task process_job[1] succeeded',
+            ),
+            WorkerLogEntry(
+                level='WARNING', logger_name='app.workers.tasks', worker_name='worker-a',
+                message='Stopping redelivered job',
+            ),
+            WorkerLogEntry(
+                level='ERROR', logger_name='billiard.pool', worker_name='worker-b',
+                message="Process 'ForkPoolWorker-1' pid:47 exited with 'signal 9 (SIGKILL)'",
+            ),
+        ])
+        db.commit()
+    finally:
+        db.close()
+    _login(client, 'logsadmin', 'CorrectHorse1')
+
+    resp = client.get('/api/v1/auth/admin/worker-logs')
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body['total'] == 3
+    assert len(body['items']) == 3
+    # newest first
+    assert body['items'][0]['message'].startswith("Process 'ForkPoolWorker-1'")
+
+    resp = client.get('/api/v1/auth/admin/worker-logs', params={'level': 'WARNING'})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body['total'] == 2
+    assert {item['level'] for item in body['items']} == {'WARNING', 'ERROR'}
+
+    resp = client.get('/api/v1/auth/admin/worker-logs', params={'worker': 'worker-b'})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body['total'] == 1
+    assert body['items'][0]['worker_name'] == 'worker-b'
+
+    resp = client.get('/api/v1/auth/admin/worker-logs', params={'q': 'SIGKILL'})
+    assert resp.status_code == 200
+    assert resp.json()['total'] == 1

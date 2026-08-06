@@ -44,7 +44,7 @@ export function SidebarNav() {
       <button
         onClick={() => setOpen((v) => !v)}
         aria-label={open ? 'Close navigation' : 'Open navigation'}
-        className="fixed left-4 top-4 z-50 flex h-9 w-9 items-center justify-center rounded-xl border border-slate-200 bg-white shadow-md transition hover:bg-slate-50"
+        className="fixed left-4 top-4 z-50 flex h-9 w-9 items-center justify-center rounded-xl border border-slate-200 bg-white shadow-md transition hover:bg-slate-50 lg:hidden"
       >
         {open ? <X className="h-4 w-4 text-slate-700" /> : <Menu className="h-4 w-4 text-slate-700" />}
       </button>
@@ -52,7 +52,7 @@ export function SidebarNav() {
       {/* Backdrop */}
       {open && (
         <div
-          className="fixed inset-0 z-40 bg-slate-950/30 backdrop-blur-sm"
+          className="fixed inset-0 z-40 bg-slate-950/30 backdrop-blur-sm lg:hidden"
           aria-hidden="true"
         />
       )}
@@ -60,7 +60,7 @@ export function SidebarNav() {
       {/* Drawer */}
       <div
         ref={drawerRef}
-        className={`fixed left-0 top-0 z-40 flex h-full w-64 flex-col bg-white shadow-2xl transition-transform duration-200 ${
+        className={`fixed left-0 top-0 z-40 flex h-full w-64 flex-col bg-white shadow-2xl transition-transform duration-200 lg:translate-x-0 lg:border-r lg:border-slate-100 lg:shadow-none ${
           open ? 'translate-x-0' : '-translate-x-full'
         }`}
       >

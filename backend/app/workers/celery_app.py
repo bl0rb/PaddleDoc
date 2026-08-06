@@ -29,3 +29,11 @@ celery_app.conf.update(
 		'visibility_timeout': _visibility_timeout,
 	},
 )
+
+# Mirrors worker log records into worker_log_entries for the admin UI (see
+# app/workers/log_capture.py). Import-time only: this connects an
+# after_setup_logger signal receiver, it does not itself touch the DB, and
+# must happen before celery's worker CLI runs its Logging bootstep -- i.e.
+# before `celery -A app.workers.tasks worker` starts, which this module
+# always is (celery_app.py is imported first, at the top of tasks.py).
+import app.workers.log_capture  # noqa: E402,F401

@@ -20,7 +20,7 @@ from urllib.parse import urlencode
 
 from authlib.common.security import generate_token
 from authlib.oauth2.rfc7636 import create_s256_code_challenge
-from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status
 from fastapi.responses import RedirectResponse
 from sqlalchemy import func, select, text, update
 from sqlalchemy.exc import IntegrityError
@@ -35,7 +35,7 @@ from app.api.deps import (
 )
 from app.core.config import settings
 from app.database.session import get_db
-from app.models.models import AuthProvider, Job, Session as SessionModel, Team, User, UserRole
+from app.models.models import AuthProvider, Job, Session as SessionModel, Team, User, UserRole, WorkerLogEntry
 from app.schemas.auth import (
     AdminUserCreateRequest,
     AdminUserListResponse,
@@ -57,6 +57,9 @@ from app.schemas.auth import (
     TeamResponse,
     TeamUpdateRequest,
     UserResponse,
+    WorkerLogEntryResponse,
+    WorkerLogLevel,
+    WorkerLogListResponse,
 )
 from app.services.oidc import OIDCError, exchange_code_for_tokens, fetch_jwks, get_discovery_document, validate_id_token
 from app.services.security import (
@@ -674,3 +677,66 @@ def admin_claim_ownerless_jobs(payload: ClaimOwnerlessRequest, db: Session = Dep
     result = db.execute(update(Job).where(Job.owner_id.is_(None)).values(owner_id=payload.owner_id))
     db.commit()
     return ClaimOwnerlessResponse(claimed=result.rowcount or 0)
+
+
+# --- admin: worker logs ------------------------------------------------------
+#
+# Read side of app/workers/log_capture.py's WorkerLogDBHandler, which is the
+# only writer (see that module for how/why records land in
+# worker_log_entries). `level` is a floor, not an exact match -- e.g.
+# level=WARNING returns WARNING, ERROR, and CRITICAL rows.
+
+_WORKER_LOG_LEVEL_ORDER = ('DEBUG', 'INFO', 'WARNING', 'ERROR', 'CRITICAL')
+_WORKER_LOG_PAGE_LIMIT_DEFAULT = 200
+_WORKER_LOG_PAGE_LIMIT_MAX = 500
+
+
+def _worker_log_response(entry: WorkerLogEntry) -> WorkerLogEntryResponse:
+    return WorkerLogEntryResponse(
+        id=entry.id,
+        created_at=entry.created_at,
+        level=entry.level,
+        logger_name=entry.logger_name,
+        worker_name=entry.worker_name,
+        task_id=entry.task_id,
+        task_name=entry.task_name,
+        message=entry.message,
+        exc_text=entry.exc_text,
+    )
+
+
+@router_admin.get('/worker-logs', response_model=WorkerLogListResponse)
+def admin_list_worker_logs(
+    db: Session = Depends(get_db),
+    level: WorkerLogLevel | None = None,
+    worker: str | None = None,
+    q: str | None = None,
+    since: datetime | None = None,
+    until: datetime | None = None,
+    limit: int = Query(default=_WORKER_LOG_PAGE_LIMIT_DEFAULT, ge=1, le=_WORKER_LOG_PAGE_LIMIT_MAX),
+    offset: int = Query(default=0, ge=0),
+) -> WorkerLogListResponse:
+    conditions = []
+    if level is not None:
+        floor_idx = _WORKER_LOG_LEVEL_ORDER.index(level.value)
+        conditions.append(WorkerLogEntry.level.in_(_WORKER_LOG_LEVEL_ORDER[floor_idx:]))
+    if worker:
+        conditions.append(WorkerLogEntry.worker_name == worker)
+    if q:
+        conditions.append(WorkerLogEntry.message.ilike(f'%{q}%'))
+    if since is not None:
+        conditions.append(WorkerLogEntry.created_at >= since)
+    if until is not None:
+        conditions.append(WorkerLogEntry.created_at <= until)
+
+    total = db.scalar(select(func.count(WorkerLogEntry.id)).where(*conditions)) or 0
+    rows = db.scalars(
+        select(WorkerLogEntry)
+        .where(*conditions)
+        # id DESC as a tiebreak keeps ordering deterministic across pages
+        # when several records share a created_at (same-millisecond writes).
+        .order_by(WorkerLogEntry.created_at.desc(), WorkerLogEntry.id.desc())
+        .limit(limit)
+        .offset(offset)
+    ).all()
+    return WorkerLogListResponse(items=[_worker_log_response(row) for row in rows], total=total)

@@ -84,6 +84,15 @@ services:
       ONNXRUNTIME_INTRA_OP_NUM_THREADS: ${ONNXRUNTIME_INTRA_OP_NUM_THREADS:-1}
       ONNXRUNTIME_INTER_OP_NUM_THREADS: ${ONNXRUNTIME_INTER_OP_NUM_THREADS:-1}
       MALLOC_ARENA_MAX: ${MALLOC_ARENA_MAX:-2}
+      # Worker log capture into worker_log_entries for the admin UI's log
+      # tail (GET /api/v1/auth/admin/worker-logs); see
+      # app/workers/log_capture.py / app/core/config.py. Independent of
+      # --loglevel (CELERY_LOG_LEVEL, worker.Dockerfile): if set MORE
+      # verbose than --loglevel, log_capture.py lowers the worker's root
+      # logger floor to match while pinning the console handler(s) at
+      # --loglevel so console verbosity is unchanged.
+      WORKER_LOG_CAPTURE_LEVEL: ${WORKER_LOG_CAPTURE_LEVEL:-INFO}
+      WORKER_LOG_RETENTION_MAX_ROWS: ${WORKER_LOG_RETENTION_MAX_ROWS:-20000}
       OPENAI_API_BASE_URL: ${OPENAI_API_BASE_URL:-}
       OPENAI_API_BEARER_TOKEN: ${OPENAI_API_BEARER_TOKEN:-}
       # Confluence import: the crawl runs on this worker, so it needs the

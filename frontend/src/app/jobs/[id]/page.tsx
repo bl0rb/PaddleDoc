@@ -2,12 +2,32 @@
 
 import { useEffect, useState } from 'react';
 import Link from 'next/link';
+import dynamic from 'next/dynamic';
 import { useParams } from 'next/navigation';
 
 import { Button } from '@/components/ui/button';
-import { MarkdownView, type JobArtifact } from '@/components/markdown/markdown-view';
+import type { JobArtifact } from '@/components/markdown/markdown-view';
 import { apiFetch, redirectIfSessionExpired } from '@/lib/api';
 import { API_BASE_URL } from '@/lib/api-base';
+import { peekCached, setCached } from '@/lib/data-cache';
+
+// react-markdown + remark-gfm + rehype-sanitize are only needed for the
+// "Rendered" tab (the default tab is "Raw" for everything but Confluence
+// imports) — loading them eagerly would tax every job-detail page visit
+// with a parser bundle most visits never use. Deferred + client-only: the
+// server-rendered shell never waits on it, and the chunk is fetched on
+// first actual need.
+const MarkdownView = dynamic(() => import('@/components/markdown/markdown-view').then((mod) => mod.MarkdownView), {
+  ssr: false,
+  loading: () => (
+    <div className="animate-pulse space-y-3" role="status" aria-label="Loading rendered preview">
+      <div className="h-4 w-3/4 rounded bg-slate-100" />
+      <div className="h-4 w-full rounded bg-slate-100" />
+      <div className="h-4 w-5/6 rounded bg-slate-100" />
+      <div className="h-4 w-2/3 rounded bg-slate-100" />
+    </div>
+  ),
+});
 
 const LOWER_PROFILE_RETRY_MAP: Record<string, string> = {
   ppocrv6_medium_structurev3: 'ppocrv6_small_structurev3',
@@ -32,7 +52,13 @@ const API = API_BASE_URL;
 
 export default function JobDetails() {
   const params = useParams<{ id: string }>();
-  const [job, setJob] = useState<Job | null>(null);
+  // Job metadata (unlike the markdown preview) isn't gated behind the
+  // document password, so it's safe to reuse: re-opening a job you already
+  // viewed this session (e.g. the browser back button) paints its header
+  // and status instantly instead of the loading skeleton every time.
+  const [job, setJob] = useState<Job | null>(() =>
+    params.id ? (peekCached<Job>(`/api/v1/jobs/${params.id}`) ?? null) : null
+  );
   const [markdown, setMarkdown] = useState('');
   const [draftMarkdown, setDraftMarkdown] = useState('');
   const [isEditing, setIsEditing] = useState(false);
@@ -83,6 +109,7 @@ export default function JobDetails() {
       }
       const jobData = await jobResp.json();
       setJob(jobData);
+      setCached(`/api/v1/jobs/${id}`, jobData);
       const jobSettings = jobData.processing_info?.settings as Record<string, unknown> | undefined;
       setViewTab(jobSettings?.mode === 'import' ? 'rendered' : 'raw');
       if (jobData.status === 'FINISHED') {
@@ -135,7 +162,24 @@ export default function JobDetails() {
   };
 
   if (!job) {
-    return <main className="min-h-screen bg-white p-8 text-slate-950">Loading job...</main>;
+    return (
+      <main className="min-h-screen bg-white px-4 py-6 text-slate-950 sm:px-6 lg:px-8">
+        <div
+          className="mx-auto w-full max-w-6xl animate-pulse space-y-4 rounded-3xl border border-slate-200 bg-white p-4 shadow-[0_24px_70px_rgba(15,23,42,0.08)] sm:p-6 lg:p-8"
+          role="status"
+          aria-label="Loading job"
+        >
+          <div className="h-9 w-32 rounded-md bg-slate-100" />
+          <div className="h-7 w-48 rounded bg-slate-100" />
+          <div className="space-y-2">
+            <div className="h-4 w-2/3 rounded bg-slate-100" />
+            <div className="h-4 w-1/3 rounded bg-slate-100" />
+            <div className="h-4 w-1/4 rounded bg-slate-100" />
+          </div>
+          <div className="h-64 rounded-md border border-slate-100 bg-slate-50" />
+        </div>
+      </main>
+    );
   }
 
   if (requirePassword) {
@@ -206,6 +250,7 @@ export default function JobDetails() {
       if (refreshed.ok) {
         const jobData = await refreshed.json();
         setJob(jobData);
+        setCached(`/api/v1/jobs/${job.id}`, jobData);
       }
     } finally {
       setIsRetryingLower(false);

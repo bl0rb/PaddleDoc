@@ -99,6 +99,10 @@ spec:
               value: {{ .Values.worker.celery.taskTimeLimitSeconds | quote }}
             - name: CELERY_BROKER_VISIBILITY_TIMEOUT_SECONDS
               value: {{ .Values.worker.celery.visibilityTimeoutSeconds | quote }}
+            - name: WORKER_LOG_CAPTURE_LEVEL
+              value: {{ .Values.worker.log.captureLevel | quote }}
+            - name: WORKER_LOG_RETENTION_MAX_ROWS
+              value: {{ .Values.worker.log.retentionMaxRows | int64 | quote }}
             # Confluence import: the crawl (and its outbound egress) runs on
             # this worker, so it needs the same IMPORT_* settings as the
             # backend. Credential decryption additionally relies on the

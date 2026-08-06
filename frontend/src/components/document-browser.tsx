@@ -7,6 +7,7 @@ import { Download, LoaderCircle, RefreshCcw, RotateCcw, Trash2 } from 'lucide-re
 import { Button } from '@/components/ui/button';
 import { apiFetch, redirectIfSessionExpired } from '@/lib/api';
 import { API_BASE_URL } from '@/lib/api-base';
+import { peekCached, setCached, useVisiblePolling } from '@/lib/data-cache';
 
 type JobStatus = 'PENDING' | 'RUNNING' | 'FINISHED' | 'FAILED';
 
@@ -155,7 +156,12 @@ export function DocumentBrowser({
   initialFolder,
 }: DocumentBrowserProps) {
   const pageSize = 50;
-  const [items, setItems] = useState<Job[]>([]);
+  // Shared with the Home/Processing views' jobs fetch: seeding from it here
+  // means returning to /jobs (or /jobs?folder=...) paints the last-known
+  // list immediately instead of an empty table while the network round
+  // trip is in flight.
+  const cacheKey = `/api/v1/${endpoint}`;
+  const [items, setItems] = useState<Job[]>(() => peekCached<Job[]>(cacheKey) ?? []);
   const [query, setQuery] = useState('');
   const [tag, setTag] = useState('');
   const [statusFilter, setStatusFilter] = useState<JobStatus | ''>('');
@@ -201,31 +207,49 @@ export function DocumentBrowser({
     );
   };
 
-  const loadItems = async () => {
+  // `filters` lets a caller fetch with values other than this render's
+  // state (needed by the Reset button below, whose setters only land on
+  // the next render — same pattern as admin/logs-tab.tsx's `load`).
+  const loadItems = async (filters?: {
+    query: string;
+    tag: string;
+    statusFilter: JobStatus | '';
+    fromDate: string;
+    toDate: string;
+  }) => {
     setLoading(true);
+    const active = filters ?? { query, tag, statusFilter, fromDate, toDate };
     const params = new URLSearchParams();
-    if (query.trim()) {
-      params.set('q', query.trim());
+    if (active.query.trim()) {
+      params.set('q', active.query.trim());
     }
-    if (tag.trim()) {
-      params.set('tag', tag.trim());
+    if (active.tag.trim()) {
+      params.set('tag', active.tag.trim());
     }
-    if (statusFilter) {
-      params.set('status', statusFilter);
+    if (active.statusFilter) {
+      params.set('status', active.statusFilter);
     }
-    if (includeDateFilters && fromDate) {
-      params.set('from_date', fromDate);
+    if (includeDateFilters && active.fromDate) {
+      params.set('from_date', active.fromDate);
     }
-    if (includeDateFilters && toDate) {
-      params.set('to_date', toDate);
+    if (includeDateFilters && active.toDate) {
+      params.set('to_date', active.toDate);
     }
 
-    const response = await apiFetch(`/api/v1/${endpoint}${params.toString() ? `?${params.toString()}` : ''}`, {
+    const hasActiveFilters = params.toString() !== '';
+    const response = await apiFetch(`/api/v1/${endpoint}${hasActiveFilters ? `?${params.toString()}` : ''}`, {
       cache: 'no-store',
     });
     if (response.ok) {
       const payload = await response.json();
-      setItems(payload.items ?? []);
+      const nextItems = (payload.items ?? []) as Job[];
+      setItems(nextItems);
+      if (!hasActiveFilters) {
+        // Only the canonical (unfiltered) list is safe to publish to the
+        // shared cache — a filtered subset would otherwise leak into other
+        // views (e.g. Home's job counts) as if it were the full list.
+        setCached(cacheKey, nextItems);
+      }
     }
     setLoading(false);
   };
@@ -239,21 +263,21 @@ export function DocumentBrowser({
         return;
       }
       const payload = await response.json();
-      setItems(payload.items ?? []);
+      const nextItems = (payload.items ?? []) as Job[];
+      setItems(nextItems);
+      setCached(cacheKey, nextItems);
     };
     void run();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  useEffect(() => {
-    const pollMs = endpoint === 'jobs' ? 5000 : 15000;
-    const interval = setInterval(() => {
-      void loadItems();
-    }, pollMs);
-    return () => {
-      clearInterval(interval);
-    };
-  }, [endpoint, query, tag, statusFilter, fromDate, toDate]);
+  // Poll briskly while something is actually queued/running, back off once
+  // everything visible is settled, and pause outright while the tab is
+  // hidden — a large jobs table has no business re-sorting/re-rendering
+  // itself every few seconds for a backgrounded tab.
+  const hasActiveJobs = items.some((job) => job.status === 'PENDING' || job.status === 'RUNNING');
+  const pollMs = endpoint === 'jobs' ? (hasActiveJobs ? 5000 : 20000) : 30000;
+  useVisiblePolling(() => void loadItems(), pollMs);
 
   const removeJob = async (id: string, password?: string) => {
     const url = new URL(`${API}/api/v1/jobs/${id}`);
@@ -582,8 +606,8 @@ export function DocumentBrowser({
           )}
         </div>
         <div className="mt-4 flex flex-wrap gap-2">
-          <Button onClick={loadItems}>Apply Filters</Button>
-          <Button variant="outline" onClick={loadItems}>
+          <Button onClick={() => void loadItems()}>Apply Filters</Button>
+          <Button variant="outline" onClick={() => void loadItems()}>
             <RefreshCcw className="mr-2 h-4 w-4" /> Refresh
           </Button>
           {endpoint === 'jobs' && (
@@ -599,7 +623,10 @@ export function DocumentBrowser({
               setStatusFilter('');
               setFromDate('');
               setToDate('');
-              window.setTimeout(() => void loadItems(), 0);
+              // The setters above only land on the next render, and this
+              // closure's `loadItems` still sees the old state — pass the
+              // cleared values explicitly.
+              void loadItems({ query: '', tag: '', statusFilter: '', fromDate: '', toDate: '' });
             }}
           >
             Reset
@@ -835,7 +862,7 @@ export function DocumentBrowser({
       </section>
 
       {protectedJobId && (
-        <div className="fixed inset-0 flex items-center justify-center bg-slate-950/50 p-4">
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/50 p-4">
           <div className="rounded-lg border border-slate-200 bg-white p-6 shadow-lg">
             <h2 className="mb-3 text-lg font-semibold">Password Required</h2>
             <p className="mb-4 text-sm text-slate-600">This job is password protected.</p>

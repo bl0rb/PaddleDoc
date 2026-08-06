@@ -1,3 +1,4 @@
+import enum
 from datetime import datetime
 
 from pydantic import BaseModel, EmailStr, Field
@@ -145,3 +146,38 @@ class ClaimOwnerlessRequest(BaseModel):
 
 class ClaimOwnerlessResponse(BaseModel):
     claimed: int
+
+
+# --- Admin: worker logs --------------------------------------------------------
+
+class WorkerLogLevel(str, enum.Enum):
+    """Query-param floor for GET /auth/admin/worker-logs -- 'WARNING' means
+    WARNING and everything more severe (WARNING, ERROR, CRITICAL). Storage
+    (WorkerLogEntry.level, see app/workers/log_capture.py) is a plain string
+    column, not a DB enum, so a level the capture-side stdlib logging module
+    knows about but this list doesn't (a custom level name) is still stored
+    -- it just cannot be used as a floor value in this filter.
+    """
+
+    DEBUG = 'DEBUG'
+    INFO = 'INFO'
+    WARNING = 'WARNING'
+    ERROR = 'ERROR'
+    CRITICAL = 'CRITICAL'
+
+
+class WorkerLogEntryResponse(BaseModel):
+    id: str
+    created_at: datetime
+    level: str
+    logger_name: str
+    worker_name: str
+    task_id: str | None = None
+    task_name: str | None = None
+    message: str
+    exc_text: str | None = None
+
+
+class WorkerLogListResponse(BaseModel):
+    items: list[WorkerLogEntryResponse]
+    total: int

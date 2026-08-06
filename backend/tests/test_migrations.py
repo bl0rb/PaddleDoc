@@ -276,3 +276,47 @@ def test_0005_import_migration_upgrade_downgrade_round_trip(tmp_path, monkeypatc
     for expected in ('import_sources', 'import_runs', 'job_artifacts'):
         assert expected in tables
     assert 'import_run_id' in {c['name'] for c in insp.get_columns('jobs')}
+
+
+def test_0006_worker_logs_migration_upgrade_downgrade_round_trip(tmp_path, monkeypatch) -> None:
+    db_path = tmp_path / 'migration_scratch_0006.db'
+    db_url = f'sqlite:///{db_path}'
+    monkeypatch.setattr(settings, 'database_url', db_url)
+
+    engine = create_engine(db_url, future=True)
+    _build_legacy_metadata().create_all(bind=engine)
+
+    cfg = _alembic_config()
+    command.stamp(cfg, '0003_job_markdown_versions')
+
+    # --- upgrade (through 0004/0005 to 0006): worker_log_entries ---
+    command.upgrade(cfg, 'head')
+
+    insp = inspect(engine)
+    assert 'worker_log_entries' in insp.get_table_names()
+
+    columns = {c['name'] for c in insp.get_columns('worker_log_entries')}
+    assert {
+        'id', 'created_at', 'level', 'logger_name', 'worker_name',
+        'task_id', 'task_name', 'message', 'exc_text',
+    } <= columns
+
+    indexes = {ix['name'] for ix in insp.get_indexes('worker_log_entries')}
+    assert {
+        'ix_worker_log_entries_created_at',
+        'ix_worker_log_entries_level',
+        'ix_worker_log_entries_worker_name',
+    } <= indexes
+
+    # --- downgrade one revision: only the 0006 addition should disappear ---
+    command.downgrade(cfg, '0005_import')
+
+    insp = inspect(engine)
+    assert 'worker_log_entries' not in insp.get_table_names()
+    # 0005's schema must survive a 0006-only downgrade untouched.
+    assert 'import_sources' in insp.get_table_names()
+
+    # --- re-upgrade: should cleanly re-apply from the 0005 baseline ---
+    command.upgrade(cfg, 'head')
+    insp = inspect(engine)
+    assert 'worker_log_entries' in insp.get_table_names()

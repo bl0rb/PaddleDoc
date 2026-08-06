@@ -57,6 +57,23 @@ class Settings(BaseSettings):
     openai_api_base_url: str = ''
     openai_api_bearer_token: str = ''
 
+    # Celery worker log capture into worker_log_entries (see
+    # app/workers/log_capture.py) -- lets the admin UI tail worker container
+    # logs without docker.sock/kubectl access, which the EKS/k8s deployment
+    # has no portable equivalent for. Only the worker process wires the
+    # handler (celery_app.py); these two settings are inert in the backend.
+    # Minimum stdlib logging level mirrored to the DB -- independent of
+    # --loglevel (stdout, still CELERY_LOG_LEVEL in worker.Dockerfile): if
+    # this is set MORE verbose than --loglevel, log_capture.py lowers the
+    # worker's root logger floor to match so records actually get
+    # constructed, while pinning --loglevel's own console/stream handler(s)
+    # so console verbosity doesn't change.
+    worker_log_capture_level: str = 'INFO'
+    # Row-count retention cap, enforced opportunistically by the handler
+    # itself on write (there is no beat/cron worker in this deployment to
+    # run a scheduled prune job).
+    worker_log_retention_max_rows: int = 20000
+
     # Session-cookie signing, OIDC state HMAC, and the key material Fernet
     # client-secret encryption is derived from (see app/services/security.py).
     # Required in any real (postgres) deployment -- see

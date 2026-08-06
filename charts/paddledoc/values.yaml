@@ -101,6 +101,18 @@ worker:
     taskSoftTimeLimitSeconds: 1500
     taskTimeLimitSeconds: 1800
     visibilityTimeoutSeconds: 1800
+  # Worker log capture into worker_log_entries for the admin UI's log tail
+  # (GET /api/v1/auth/admin/worker-logs) -- see
+  # app/workers/log_capture.py / app/core/config.py. Independent of
+  # --loglevel (stdout, still CELERY_LOG_LEVEL via worker.extraEnv): if set
+  # MORE verbose than --loglevel, log_capture.py lowers the worker's root
+  # logger floor to match while pinning the console handler(s) at
+  # --loglevel so console verbosity doesn't change.
+  log:
+    captureLevel: INFO
+    # Row-count retention cap; pruned opportunistically by the handler
+    # itself (no beat/cron worker in this deployment).
+    retentionMaxRows: 20000
   resources: {}
   nodeSelector: {}
   tolerations: []

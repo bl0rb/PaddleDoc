@@ -1,12 +1,13 @@
 'use client';
 
-import { useEffect, useRef, useState } from 'react';
+import { useRef, useState } from 'react';
 import { AnimatePresence, motion } from 'framer-motion';
 import { Sparkles, UploadCloud } from 'lucide-react';
 import { useRouter } from 'next/navigation';
 
 import { Button } from '@/components/ui/button';
 import { apiFetch } from '@/lib/api';
+import { peekCached, setCached, useCachedResource } from '@/lib/data-cache';
 import {
   API,
   type FolderOptions,
@@ -19,6 +20,10 @@ import {
   formatBytes,
   sendFormDataWithProgress,
 } from './shared';
+
+const JOBS_KEY = '/api/v1/jobs';
+const PADDLE_SETTINGS_KEY = '/api/v1/paddle/settings';
+const PADDLE_CAPABILITIES_KEY = '/api/v1/paddle/capabilities';
 
 export function ProcessingFlow() {
   const router = useRouter();
@@ -44,12 +49,43 @@ export function ProcessingFlow() {
   const [collectionFiles, setCollectionFiles] = useState<string[]>([]);
   const [uploadProgress, setUploadProgress] = useState<UploadProgress | null>(null);
 
-  const [capabilities, setCapabilities] = useState<PaddleCapabilities>({ profiles: [] });
-  const [selectedProfileId, setSelectedProfileId] = useState('ppocrv6_tiny');
-  const [settings, setSettings] = useState<PaddleSettings>({
-    default_profile: 'ppocrv6_tiny',
-    timeout_seconds: 300,
+  // Jobs (for the folder picker), the default profile setting, and the
+  // profile catalog itself all come from the shared cache: they rarely
+  // change between visits, so a remount of this step (e.g. Home ->
+  // Processing -> Jobs -> Processing) paints instantly from the last
+  // known value instead of showing "Loading profiles..." every time.
+  const fetchJobsForFolders = async () => {
+    const response = await apiFetch(`/api/v1/jobs`, { cache: 'no-store' });
+    if (!response.ok) throw new Error('Failed to load jobs');
+    const payload = await response.json();
+    return (payload.items ?? []) as Job[];
+  };
+  const fetchPaddleSettings = async () => {
+    const response = await apiFetch(`/api/v1/paddle/settings`, { cache: 'no-store' });
+    if (!response.ok) throw new Error('Failed to load paddle settings');
+    const payload = await response.json();
+    return { default_profile: payload.default_profile, timeout_seconds: payload.timeout_seconds } as PaddleSettings;
+  };
+  const fetchPaddleCapabilities = async () => {
+    const response = await apiFetch(`/api/v1/paddle/capabilities`, { cache: 'no-store' });
+    if (!response.ok) throw new Error('Failed to load paddle capabilities');
+    const payload = await response.json();
+    return { profiles: payload.profiles ?? [] } as PaddleCapabilities;
+  };
+
+  const jobsResource = useCachedResource(JOBS_KEY, fetchJobsForFolders, { ttlMs: 15_000 });
+  const settingsResource = useCachedResource(PADDLE_SETTINGS_KEY, fetchPaddleSettings, { ttlMs: 60_000 });
+  const capabilitiesResource = useCachedResource(PADDLE_CAPABILITIES_KEY, fetchPaddleCapabilities, {
+    ttlMs: 60_000,
   });
+
+  const capabilities = capabilitiesResource.data ?? { profiles: [] };
+  const [selectedProfileId, setSelectedProfileId] = useState(
+    () => peekCached<PaddleSettings>(PADDLE_SETTINGS_KEY)?.default_profile ?? 'ppocrv6_tiny',
+  );
+  const [settings, setSettings] = useState<PaddleSettings>(
+    () => peekCached<PaddleSettings>(PADDLE_SETTINGS_KEY) ?? { default_profile: 'ppocrv6_tiny', timeout_seconds: 300 },
+  );
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [savingSettings, setSavingSettings] = useState(false);
   const [settingsMessage, setSettingsMessage] = useState<string | null>(null);
@@ -63,67 +99,31 @@ export function ProcessingFlow() {
   const selectedSubfolderOptions = folder ? (folderOptions[folder] ?? []) : [];
 
   const refreshFolderOptions = async () => {
-    const response = await apiFetch(`/api/v1/jobs`, { cache: 'no-store' });
-    if (!response.ok) return;
-    const payload = await response.json();
-    const items = (payload.items ?? []) as Job[];
-    setFolderOptions((prev) => buildFolderOptions(prev, items));
+    await jobsResource.revalidate();
   };
 
-  const refreshPaddleSettings = async () => {
-    const response = await apiFetch(`/api/v1/paddle/settings`, { cache: 'no-store' });
-    if (!response.ok) return;
-    const payload = await response.json();
-    setSettings({
-      default_profile: payload.default_profile,
-      timeout_seconds: payload.timeout_seconds,
-    });
-    setSelectedProfileId(payload.default_profile ?? 'ppocrv6_tiny');
-  };
+  // Adopt the cached/fetched settings and jobs snapshots into local editable
+  // state as they change ("adjusting state during render" — see
+  // https://react.dev/learn/you-might-not-need-an-effect — rather than a
+  // useEffect mirror, since these two are the *initial* value for state the
+  // user then edits locally: the profile settings form, and folderOptions'
+  // merge of server folders with locally-created ones).
+  const [lastSettingsData, setLastSettingsData] = useState(settingsResource.data);
+  if (settingsResource.data !== lastSettingsData) {
+    setLastSettingsData(settingsResource.data);
+    if (settingsResource.data) {
+      setSettings(settingsResource.data);
+      setSelectedProfileId(settingsResource.data.default_profile ?? 'ppocrv6_tiny');
+    }
+  }
 
-  const refreshPaddleCapabilities = async () => {
-    const response = await apiFetch(`/api/v1/paddle/capabilities`, { cache: 'no-store' });
-    if (!response.ok) return;
-    const payload = await response.json();
-    setCapabilities({ profiles: payload.profiles ?? [] });
-  };
-
-  useEffect(() => {
-    let cancelled = false;
-
-    const loadInitialData = async () => {
-      const [jobsResponse, settingsResponse, capabilitiesResponse] = await Promise.all([
-        apiFetch(`/api/v1/jobs`, { cache: 'no-store' }),
-        apiFetch(`/api/v1/paddle/settings`, { cache: 'no-store' }),
-        apiFetch(`/api/v1/paddle/capabilities`, { cache: 'no-store' }),
-      ]);
-
-      if (!cancelled && jobsResponse.ok) {
-        const payload = await jobsResponse.json();
-        const items = (payload.items ?? []) as Job[];
-        setFolderOptions((prev) => buildFolderOptions(prev, items));
-      }
-
-      if (!cancelled && settingsResponse.ok) {
-        const payload = await settingsResponse.json();
-        setSettings({
-          default_profile: payload.default_profile,
-          timeout_seconds: payload.timeout_seconds,
-        });
-        setSelectedProfileId(payload.default_profile ?? 'ppocrv6_tiny');
-      }
-
-      if (!cancelled && capabilitiesResponse.ok) {
-        const payload = await capabilitiesResponse.json();
-        setCapabilities({ profiles: payload.profiles ?? [] });
-      }
-    };
-
-    void loadInitialData();
-    return () => {
-      cancelled = true;
-    };
-  }, []);
+  const [lastJobsData, setLastJobsData] = useState(jobsResource.data);
+  if (jobsResource.data !== lastJobsData) {
+    setLastJobsData(jobsResource.data);
+    if (jobsResource.data) {
+      setFolderOptions((prev) => buildFolderOptions(prev, jobsResource.data as Job[]));
+    }
+  }
 
   const uploadSingle = async (file: File) => {
     if (!selectedProfile) {
@@ -305,10 +305,16 @@ export function ProcessingFlow() {
     }
 
     const payload = await response.json();
-    setSettings({
+    const nextSettings: PaddleSettings = {
       default_profile: payload.default_profile,
       timeout_seconds: payload.timeout_seconds,
-    });
+    };
+    setSettings(nextSettings);
+    // The PUT response is already the authoritative value — push it into
+    // the shared cache so any other mounted view (e.g. Home, if reopened)
+    // reflects the change immediately instead of showing the pre-save value
+    // until its own TTL expires.
+    setCached(PADDLE_SETTINGS_KEY, nextSettings);
     setSelectedProfileId(payload.default_profile ?? requestedProfile);
     if (payload.default_profile !== requestedProfile) {
       setSettingsMessage(`Profile '${requestedProfile}' is not available. Saved as '${payload.default_profile}'.`);
