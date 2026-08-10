@@ -3,8 +3,10 @@ from datetime import datetime, timezone
 import html
 import importlib.util
 import json as _json
+import logging
 import platform
 import re
+import time
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -18,6 +20,8 @@ import yaml
 
 from app.core.config import settings
 from app.services.quality_gate import evaluate_document_quality
+
+logger = logging.getLogger(__name__)
 
 _RUNTIME_SETTINGS_KEY = 'paddle:runtime_settings'
 _DEFAULT_PROFILE_ID = 'ppocrv6_tiny'
@@ -534,31 +538,145 @@ def _paddleocr_to_structure(
     }
 
 
+_OPENAI_VISION_DEFAULT_SYSTEM_PROMPT = (
+    'You are a precise document OCR and layout extraction assistant. '
+    'Given an image of a document page, extract all text and structure faithfully. '
+    'Return only well-structured Markdown. '
+    'Preserve headings, bullet lists, numbered lists, and tables (as GFM tables). '
+    'Do not add commentary, preamble, or explanation outside the Markdown.'
+)
+
+
+def _call_vision_chat_api(
+    *,
+    api_base: str,
+    bearer_token: str,
+    model_name: str,
+    system_prompt: str,
+    image_b64: str,
+    page_num: int,
+    connection_label: str,
+) -> str:
+    """POST one page image to an OpenAI-compatible /v1/chat/completions
+    endpoint and return the extracted Markdown. Shared by
+    `_openai_vision_to_structure` (explicit params rather than a closure over
+    `settings`/`profile` so the same code path serves both the env-based
+    profile and an admin-configured VlConnection override).
+
+    `connection_label` (the VlConnection's admin-assigned name, or a generic
+    label for the env-based profile -- see `_openai_vision_to_structure`) is
+    what error messages raised here show the caller. `api_base` itself is a
+    secret-adjacent, admin-configured value (may point at an internal/VPC-only
+    host) that regular team members must never see: raised RuntimeErrors
+    propagate straight into `job.error_message` / `processing_info.execution`
+    (job detail response, `_fallback_convert_with_frontmatter`'s
+    fallback_reason) and the benchmark report/export (`_variant_metrics_from_job`
+    reads `job.error_message` verbatim) -- both readable by any teammate who
+    can see the job/run, not just admins. The full `api_base` is logged here
+    instead, for operators with worker log access.
+    """
+    payload = {
+        'model': model_name,
+        'messages': [
+            {'role': 'system', 'content': system_prompt},
+            {
+                'role': 'user',
+                'content': [
+                    {
+                        'type': 'image_url',
+                        'image_url': {'url': f'data:image/png;base64,{image_b64}'},
+                    },
+                    {
+                        'type': 'text',
+                        'text': f'Extract the full text and layout of page {page_num} as Markdown.',
+                    },
+                ],
+            },
+        ],
+        'max_tokens': 4096,
+    }
+    data = _json.dumps(payload).encode()
+    req = urllib.request.Request(
+        f'{api_base}/v1/chat/completions',
+        data=data,
+        method='POST',
+        headers={
+            'Content-Type': 'application/json',
+            'Authorization': f'Bearer {bearer_token}',
+        },
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=120) as resp:  # noqa: S310
+            body = _json.loads(resp.read().decode())
+    except urllib.error.HTTPError as exc:
+        error_body = exc.read().decode(errors='replace')
+        logger.warning(
+            'VL endpoint "%s" (%s) returned HTTP %s for page %s: %s',
+            connection_label, api_base, exc.code, page_num, error_body[:400],
+        )
+        raise RuntimeError(
+            f'VL endpoint "{connection_label}" returned HTTP {exc.code} for page {page_num}: {error_body[:400]}'
+        ) from exc
+    except urllib.error.URLError as exc:
+        logger.warning('VL endpoint "%s" (%s) unreachable: %s', connection_label, api_base, exc.reason)
+        raise RuntimeError(
+            f'VL endpoint "{connection_label}" unreachable: {exc.reason}'
+        ) from exc
+
+    choices = body.get('choices') or []
+    if not choices:
+        logger.warning('VL endpoint "%s" (%s) returned no choices for page %s', connection_label, api_base, page_num)
+        raise RuntimeError(f'VL endpoint "{connection_label}" returned no choices for page {page_num}')
+    content = (choices[0].get('message') or {}).get('content') or ''
+    return content.strip()
+
+
+def _page_to_base64_png(pdf_path: Path, page_index: int) -> str:
+    import pypdfium2 as pdfium  # noqa: PLC0415
+
+    doc = pdfium.PdfDocument(str(pdf_path))
+    page = doc[page_index]
+    bitmap = page.render(scale=2.0)  # 144 dpi — good quality / reasonable token cost
+    pil_image = bitmap.to_pil()
+    import io  # noqa: PLC0415
+    buf = io.BytesIO()
+    pil_image.save(buf, format='PNG')
+    return base64.b64encode(buf.getvalue()).decode()
+
+
 def _openai_vision_to_structure(
     source: Path,
     profile: dict[str, str],
+    *,
+    vl_override: dict[str, str] | None = None,
 ) -> tuple[list[dict], dict]:
     """Convert a document to structured pages by sending each page as a base64
     PNG to an OpenAI-compatible vision endpoint.
 
-    Requires:
+    Absent `vl_override`, requires:
         OPENAI_API_BASE_URL  – e.g. https://api.openai.com or http://localhost:11434
         OPENAI_API_BEARER_TOKEN – API key / bearer token
 
+    `vl_override` (base_url/api_key/model/system_prompt, all optional keys)
+    lets an admin-configured VlConnection (see app/api/benchmarks.py,
+    app/workers/tasks.py) take priority over the env-based profile on a
+    per-job basis, without touching the env-based path when absent (`None`
+    is a no-op -- byte-identical to the pre-override behavior).
+
     The endpoint is expected to be compatible with the OpenAI chat-completions API
-    (POST /v1/chat/completions). The model name is taken from the profile's
-    'vision_model' key (default: 'gpt-4o').
+    (POST /v1/chat/completions). The model name falls back to the profile's
+    'vision_model' key, then 'gpt-4o'.
     """
     try:
-        from pypdf import PdfReader, PdfWriter  # noqa: PLC0415
-        import pypdfium2 as pdfium  # noqa: PLC0415
+        from pypdf import PdfReader  # noqa: PLC0415
+        import pypdfium2  # noqa: F401,PLC0415
     except ImportError as exc:
         raise RuntimeError(
             f'pypdfium2 is required for the OpenAI vision pipeline: {exc}'
         ) from exc
 
-    api_base = (settings.openai_api_base_url or '').rstrip('/')
-    bearer_token = settings.openai_api_bearer_token or ''
+    api_base = ((vl_override or {}).get('base_url') or settings.openai_api_base_url or '').rstrip('/')
+    bearer_token = (vl_override or {}).get('api_key') or settings.openai_api_bearer_token or ''
     if not api_base:
         raise RuntimeError(
             'OPENAI_API_BASE_URL is not configured. '
@@ -570,74 +688,25 @@ def _openai_vision_to_structure(
             'Set it via environment variable before using the openai_vision profile.'
         )
 
-    model_name = profile.get('vision_model') or 'gpt-4o'
-    system_prompt = (
-        'You are a precise document OCR and layout extraction assistant. '
-        'Given an image of a document page, extract all text and structure faithfully. '
-        'Return only well-structured Markdown. '
-        'Preserve headings, bullet lists, numbered lists, and tables (as GFM tables). '
-        'Do not add commentary, preamble, or explanation outside the Markdown.'
-    )
-
-    def _page_to_base64_png(pdf_path: Path, page_index: int) -> str:
-        doc = pdfium.PdfDocument(str(pdf_path))
-        page = doc[page_index]
-        bitmap = page.render(scale=2.0)  # 144 dpi — good quality / reasonable token cost
-        pil_image = bitmap.to_pil()
-        import io  # noqa: PLC0415
-        buf = io.BytesIO()
-        pil_image.save(buf, format='PNG')
-        return base64.b64encode(buf.getvalue()).decode()
+    model_name = (vl_override or {}).get('model') or profile.get('vision_model') or 'gpt-4o'
+    system_prompt = ((vl_override or {}).get('system_prompt') or '').strip() or _OPENAI_VISION_DEFAULT_SYSTEM_PROMPT
+    # Shown to any teammate who can see the job/benchmark run (error
+    # messages, fallback_reason, report/export -- see _call_vision_chat_api's
+    # docstring); the connection's admin-assigned name, never its base_url.
+    # No VlConnection is attached on the env-based (non-benchmark) path, so
+    # there's no name to borrow -- fall back to a generic, non-secret label.
+    connection_label = (vl_override or {}).get('name') or 'OpenAI vision (env-configured)'
 
     def _call_vision_api(image_b64: str, page_num: int) -> str:
-        payload = {
-            'model': model_name,
-            'messages': [
-                {'role': 'system', 'content': system_prompt},
-                {
-                    'role': 'user',
-                    'content': [
-                        {
-                            'type': 'image_url',
-                            'image_url': {'url': f'data:image/png;base64,{image_b64}'},
-                        },
-                        {
-                            'type': 'text',
-                            'text': f'Extract the full text and layout of page {page_num} as Markdown.',
-                        },
-                    ],
-                },
-            ],
-            'max_tokens': 4096,
-        }
-        data = _json.dumps(payload).encode()
-        req = urllib.request.Request(
-            f'{api_base}/v1/chat/completions',
-            data=data,
-            method='POST',
-            headers={
-                'Content-Type': 'application/json',
-                'Authorization': f'Bearer {bearer_token}',
-            },
+        return _call_vision_chat_api(
+            api_base=api_base,
+            bearer_token=bearer_token,
+            model_name=model_name,
+            system_prompt=system_prompt,
+            image_b64=image_b64,
+            page_num=page_num,
+            connection_label=connection_label,
         )
-        try:
-            with urllib.request.urlopen(req, timeout=120) as resp:  # noqa: S310
-                body = _json.loads(resp.read().decode())
-        except urllib.error.HTTPError as exc:
-            error_body = exc.read().decode(errors='replace')
-            raise RuntimeError(
-                f'OpenAI vision API returned HTTP {exc.code} for page {page_num}: {error_body[:400]}'
-            ) from exc
-        except urllib.error.URLError as exc:
-            raise RuntimeError(
-                f'OpenAI vision API unreachable ({api_base}): {exc.reason}'
-            ) from exc
-
-        choices = body.get('choices') or []
-        if not choices:
-            raise RuntimeError(f'OpenAI vision API returned no choices for page {page_num}')
-        content = (choices[0].get('message') or {}).get('content') or ''
-        return content.strip()
 
     suffix = source.suffix.lower()
     page_structures: list[dict] = []
@@ -691,6 +760,63 @@ def _openai_vision_to_structure(
         'vision_model': model_name,
         'api_base': api_base,
     }
+
+
+def test_vl_connection(
+    base_url: str,
+    model: str,
+    api_key: str,
+    system_prompt: str,
+    timeout_seconds: float = 20.0,
+) -> dict[str, object]:
+    """Probe an OpenAI-compatible vision endpoint with one minimal,
+    text-only chat-completion request (no image) -- just enough to confirm
+    the endpoint is reachable and the credential is accepted, without the
+    cost/latency of a real page render. Used by
+    POST /api/v1/auth/admin/vl-connections/{id}/test.
+
+    Deliberately does NOT use app.services.safe_fetch (no SSRF host
+    blocking): admin-entered VL connection endpoints are expected to be
+    internal/private (self-hosted vLLM/Ollama/etc.), which safe_fetch's
+    private-IP blocking would otherwise make untestable. Same
+    HTTPError/URLError handling/truncation style as `_call_vision_chat_api`.
+    """
+    normalized_base = (base_url or '').rstrip('/')
+    payload = {
+        'model': model,
+        'messages': [
+            {'role': 'system', 'content': system_prompt or _OPENAI_VISION_DEFAULT_SYSTEM_PROMPT},
+            {'role': 'user', 'content': 'Reply with a single word to confirm connectivity.'},
+        ],
+        'max_tokens': 16,
+    }
+    data = _json.dumps(payload).encode()
+    req = urllib.request.Request(
+        f'{normalized_base}/v1/chat/completions',
+        data=data,
+        method='POST',
+        headers={
+            'Content-Type': 'application/json',
+            'Authorization': f'Bearer {api_key}',
+        },
+    )
+    started = time.monotonic()
+    try:
+        with urllib.request.urlopen(req, timeout=timeout_seconds) as resp:  # noqa: S310
+            resp.read()
+    except urllib.error.HTTPError as exc:
+        latency_ms = int((time.monotonic() - started) * 1000)
+        error_body = exc.read().decode(errors='replace')
+        return {'ok': False, 'detail': f'HTTP {exc.code}: {error_body[:400]}', 'latency_ms': latency_ms}
+    except urllib.error.URLError as exc:
+        latency_ms = int((time.monotonic() - started) * 1000)
+        return {'ok': False, 'detail': f'Unreachable ({normalized_base}): {exc.reason}', 'latency_ms': latency_ms}
+    except Exception as exc:  # pragma: no cover - defensive catch-all
+        latency_ms = int((time.monotonic() - started) * 1000)
+        return {'ok': False, 'detail': str(exc), 'latency_ms': latency_ms}
+
+    latency_ms = int((time.monotonic() - started) * 1000)
+    return {'ok': True, 'detail': 'Connected', 'latency_ms': latency_ms}
 
 
 def _paddlevl_to_structure(
@@ -866,6 +992,7 @@ def convert_to_markdown_with_details(
     input_path: str,
     profile_id: str | None = None,
     metadata: dict[str, object] | None = None,
+    vl_override: dict[str, str] | None = None,
 ) -> tuple[str, dict]:
     source = Path(input_path).resolve()
     if not source.exists():
@@ -887,7 +1014,9 @@ def convert_to_markdown_with_details(
         selected_pipeline = selected_profile.get('pipeline', 'ppstructurev3')
         converter = 'ppstructure-json-to-rag-markdown'
         if selected_pipeline == 'openai_vision':
-            page_structures, extraction_meta = _openai_vision_to_structure(source, selected_profile)
+            page_structures, extraction_meta = _openai_vision_to_structure(
+                source, selected_profile, vl_override=vl_override
+            )
             converter = 'openai-vision-to-rag-markdown'
         elif selected_pipeline == 'paddlevl':
             page_structures, extraction_meta = _paddlevl_to_structure(source, capability)

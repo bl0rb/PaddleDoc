@@ -1,21 +1,23 @@
 'use client';
 
 import { useState } from 'react';
-import { KeyRound, ShieldAlert, Terminal, Users, UsersRound } from 'lucide-react';
+import { KeyRound, ScanEye, ShieldAlert, Terminal, Users, UsersRound } from 'lucide-react';
 
 import { useAuth } from '@/lib/auth-context';
 import { UsersTab } from '@/components/admin/users-tab';
 import { TeamsTab } from '@/components/admin/teams-tab';
 import { ProvidersTab } from '@/components/admin/providers-tab';
 import { LogsTab } from '@/components/admin/logs-tab';
+import { VlConnectionsTab } from '@/components/admin/vl-connections-tab';
 
-type TabId = 'users' | 'teams' | 'providers' | 'logs';
+type TabId = 'users' | 'teams' | 'providers' | 'logs' | 'vl-connections';
 
 const tabs: { id: TabId; label: string; icon: typeof Users }[] = [
   { id: 'users', label: 'Users', icon: Users },
   { id: 'teams', label: 'Teams', icon: UsersRound },
   { id: 'providers', label: 'Identity Providers', icon: KeyRound },
   { id: 'logs', label: 'Logs', icon: Terminal },
+  { id: 'vl-connections', label: 'VL Connections', icon: ScanEye },
 ];
 
 export default function AdminPage() {
@@ -45,7 +47,8 @@ export default function AdminPage() {
         <header className="mb-6">
           <h1 className="text-2xl font-semibold text-slate-950">Administration</h1>
           <p className="mt-1 text-sm text-slate-500">
-            Manage users, teams, single sign-on identity providers, and worker logs.
+            Manage users, teams, single sign-on identity providers, worker logs, and VL
+            connections.
           </p>
         </header>
 
@@ -79,6 +82,7 @@ export default function AdminPage() {
         {tab === 'teams' && <TeamsTab />}
         {tab === 'providers' && <ProvidersTab />}
         {tab === 'logs' && <LogsTab />}
+        {tab === 'vl-connections' && <VlConnectionsTab />}
       </div>
     </main>
   );

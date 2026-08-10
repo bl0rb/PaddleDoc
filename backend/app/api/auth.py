@@ -17,7 +17,7 @@ doc:
 import json
 import secrets
 from datetime import datetime, timedelta, timezone
-from urllib.parse import urlencode
+from urllib.parse import urlencode, urlsplit
 
 from authlib.common.security import generate_token
 from authlib.oauth2.rfc7636 import create_s256_code_challenge
@@ -36,7 +36,17 @@ from app.api.deps import (
 )
 from app.core.config import settings
 from app.database.session import get_db
-from app.models.models import ApiToken, AuthProvider, Job, Session as SessionModel, Team, User, UserRole, WorkerLogEntry
+from app.models.models import (
+    ApiToken,
+    AuthProvider,
+    Job,
+    Session as SessionModel,
+    Team,
+    User,
+    UserRole,
+    VlConnection,
+    WorkerLogEntry,
+)
 from app.schemas.auth import (
     AdminUserCreateRequest,
     AdminUserListResponse,
@@ -62,14 +72,22 @@ from app.schemas.auth import (
     TeamResponse,
     TeamUpdateRequest,
     UserResponse,
+    VlConnectionAdminListResponse,
+    VlConnectionAdminResponse,
+    VlConnectionCreateRequest,
+    VlConnectionTestResponse,
+    VlConnectionUpdateRequest,
     WorkerLogEntryResponse,
     WorkerLogLevel,
     WorkerLogListResponse,
 )
+from app.services import paddle_service
 from app.services.oidc import OIDCError, exchange_code_for_tokens, fetch_jwks, get_discovery_document, validate_id_token
 from app.services.security import (
     decrypt_client_secret,
+    decrypt_vl_api_key,
     encrypt_client_secret,
+    encrypt_vl_api_key,
     enforce_rate_limit,
     generate_session_token,
     hash_password,
@@ -780,6 +798,141 @@ def admin_test_provider(provider_id: str, db: Session = Depends(get_db)) -> Prov
         authorization_endpoint=discovery.get('authorization_endpoint'),
         token_endpoint=discovery.get('token_endpoint'),
     )
+
+
+# --- admin: VL connections -------------------------------------------------------
+#
+# Admin-managed OpenAI-compatible vision-API endpoints, usable as benchmark
+# variants (see app/api/benchmarks.py, app/models/models.VlConnection).
+# Mirrors the OIDC-providers admin block above 1:1, PUT instead of PATCH for
+# the update verb per the API contract.
+
+def _normalize_vl_base_url(raw: str) -> str:
+    """Same shape rules as import_routes._normalize_base_url (scheme must be
+    http/https, host present, no embedded credentials, no query/fragment,
+    trailing slash stripped) -- duplicated locally rather than imported from
+    import_routes.py to avoid a cross-feature import into this otherwise
+    unrelated router module. Deliberately does NOT apply import_routes'
+    SSRF host-blocking: admin-entered VL endpoints are expected to be
+    internal/private (self-hosted vLLM/Ollama/etc.)."""
+    value = raw.strip()
+    parts = urlsplit(value)
+    if parts.scheme not in ('http', 'https'):
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail='base_url must use http or https')
+    if not parts.hostname:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail='base_url must include a host')
+    if parts.username or parts.password:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail='base_url must not embed credentials'
+        )
+    if parts.query or parts.fragment:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail='base_url must not contain a query or fragment'
+        )
+    return f"{parts.scheme}://{parts.netloc}{parts.path.rstrip('/')}"
+
+
+def _vl_connection_response(connection: VlConnection) -> VlConnectionAdminResponse:
+    return VlConnectionAdminResponse(
+        id=connection.id,
+        name=connection.name,
+        base_url=connection.base_url,
+        model=connection.model,
+        has_api_key=bool(connection.api_key_encrypted),
+        system_prompt=connection.system_prompt,
+        enabled=connection.enabled,
+        created_at=connection.created_at,
+        updated_at=connection.updated_at,
+    )
+
+
+@router_admin.get('/vl-connections', response_model=VlConnectionAdminListResponse)
+def admin_list_vl_connections(request: Request, db: Session = Depends(get_db)) -> VlConnectionAdminListResponse:
+    enforce_rate_limit(request)
+    connections = db.scalars(select(VlConnection).order_by(VlConnection.name)).all()
+    return VlConnectionAdminListResponse(items=[_vl_connection_response(c) for c in connections])
+
+
+@router_admin.post('/vl-connections', response_model=VlConnectionAdminResponse, status_code=status.HTTP_201_CREATED)
+def admin_create_vl_connection(
+    payload: VlConnectionCreateRequest, request: Request, db: Session = Depends(get_db)
+) -> VlConnectionAdminResponse:
+    enforce_rate_limit(request)
+    connection = VlConnection(
+        name=payload.name.strip(),
+        base_url=_normalize_vl_base_url(payload.base_url),
+        model=payload.model.strip(),
+        api_key_encrypted=encrypt_vl_api_key(payload.api_key),
+        system_prompt=payload.system_prompt,
+        enabled=payload.enabled,
+    )
+    db.add(connection)
+    db.commit()
+    return _vl_connection_response(connection)
+
+
+@router_admin.put('/vl-connections/{connection_id}', response_model=VlConnectionAdminResponse)
+def admin_update_vl_connection(
+    connection_id: str, payload: VlConnectionUpdateRequest, request: Request, db: Session = Depends(get_db)
+) -> VlConnectionAdminResponse:
+    enforce_rate_limit(request)
+    connection = db.get(VlConnection, connection_id)
+    if connection is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail='VL connection not found')
+    if payload.name is not None:
+        connection.name = payload.name.strip()
+    if payload.base_url is not None:
+        connection.base_url = _normalize_vl_base_url(payload.base_url)
+    if payload.model is not None:
+        connection.model = payload.model.strip()
+    # Write-only update contract: omitted or null api_key keeps the stored one.
+    if payload.api_key:
+        connection.api_key_encrypted = encrypt_vl_api_key(payload.api_key)
+    if payload.system_prompt is not None:
+        connection.system_prompt = payload.system_prompt
+    if payload.enabled is not None:
+        connection.enabled = payload.enabled
+    db.commit()
+    return _vl_connection_response(connection)
+
+
+@router_admin.delete('/vl-connections/{connection_id}')
+def admin_delete_vl_connection(connection_id: str, request: Request, db: Session = Depends(get_db)) -> dict[str, str]:
+    enforce_rate_limit(request)
+    connection = db.get(VlConnection, connection_id)
+    if connection is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail='VL connection not found')
+    # No cascade needed: Job only holds a loose vl_connection_id string in
+    # processing_info.settings, not a FK, so a still-referenced connection
+    # simply produces the graceful 'VL connection is no longer available'
+    # job failure in app/workers/tasks.py, not an integrity error.
+    db.delete(connection)
+    db.commit()
+    return {'status': 'deleted'}
+
+
+@router_admin.post('/vl-connections/{connection_id}/test', response_model=VlConnectionTestResponse)
+def admin_test_vl_connection(
+    connection_id: str, request: Request, db: Session = Depends(get_db)
+) -> VlConnectionTestResponse:
+    enforce_rate_limit(request)
+    connection = db.get(VlConnection, connection_id)
+    if connection is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail='VL connection not found')
+
+    try:
+        api_key = decrypt_vl_api_key(connection.api_key_encrypted)
+    except ValueError:
+        return VlConnectionTestResponse(
+            ok=False,
+            detail='Stored API key could not be decrypted (SECRET_KEY changed?); the key must be re-entered',
+            latency_ms=None,
+        )
+
+    result = paddle_service.test_vl_connection(
+        connection.base_url, connection.model, api_key, connection.system_prompt
+    )
+    return VlConnectionTestResponse(**result)
 
 
 # --- admin: legacy job claiming ---------------------------------------------------

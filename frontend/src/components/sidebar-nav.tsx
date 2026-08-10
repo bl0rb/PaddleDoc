@@ -3,13 +3,14 @@
 import { useEffect, useRef, useState } from 'react';
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
-import { Home, Menu, X, Cpu, FolderOpen, Settings, Shield, LogOut } from 'lucide-react';
+import { Home, Menu, X, Cpu, FolderOpen, Gauge, Settings, Shield, LogOut } from 'lucide-react';
 import { useAuth } from '@/lib/auth-context';
 
 const links = [
   { href: '/', label: 'Home', icon: Home },
   { href: '/processing', label: 'Processing', icon: Cpu },
   { href: '/jobs', label: 'Jobs', icon: FolderOpen },
+  { href: '/benchmark', label: 'Benchmark', icon: Gauge },
 ];
 
 export function SidebarNav() {

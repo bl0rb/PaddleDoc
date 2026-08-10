@@ -67,6 +67,18 @@ class Job(Base):
     import_run_id: Mapped[str | None] = mapped_column(
         String(36), ForeignKey('import_runs.id', ondelete='SET NULL'), nullable=True, index=True
     )
+    # Set on jobs created by POST /benchmarks (one Job per requested variant:
+    # VL connections + optional OCR profile) -- see app/api/benchmarks.py.
+    # These children bypass the duplicate-409/version-chain logic in
+    # create_job_from_upload entirely (document_version is always 1,
+    # previous_job_id always None) and are excluded from every normal job
+    # surface by construction -- GET /jobs, GET /search,
+    # _find_predecessor_job, and the _apply_visible_filter-based
+    # /stats, /markdown-files, /folders/* and collection queries -- but
+    # remain individually fetchable by id like any other job.
+    benchmark_run_id: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey('benchmark_runs.id', ondelete='SET NULL'), nullable=True, index=True
+    )
     # sha256 hex of the raw upload bytes, computed once at upload time.
     # Drives duplicate-content detection and document versioning (see
     # create_job_from_upload in app/api/routes.py) -- NULL for jobs created
@@ -100,6 +112,7 @@ class Job(Base):
     )
     owner: Mapped['User | None'] = relationship(back_populates='owned_jobs')
     import_run: Mapped['ImportRun | None'] = relationship(back_populates='jobs')
+    benchmark_run: Mapped['BenchmarkRun | None'] = relationship(back_populates='jobs')
 
 
 class JobMarkdownVersion(Base):
@@ -196,6 +209,40 @@ class AuthProvider(Base):
     users: Mapped[list['User']] = relationship(back_populates='oidc_provider')
 
 
+class VlConnection(Base):
+    """Admin-managed OpenAI-compatible vision-API endpoint, usable as a
+    benchmark variant (see BenchmarkRun / app/api/benchmarks.py) alongside
+    the env-configured openai_vision profile.
+
+    `api_key_encrypted` is Fernet-encrypted at rest with a key derived via
+    HKDF-SHA256(SECRET_KEY, info="vl-connection-api-key") -- see
+    app/services/security.py. Write-only at the API: no response schema
+    carries it (only a `has_api_key` boolean), decrypted only inside the
+    admin /test endpoint and app/workers/tasks.py's benchmark job dispatch.
+    Global resource (not owned by a user), so there is no owner FK.
+    """
+
+    __tablename__ = 'vl_connections'
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    name: Mapped[str] = mapped_column(String(255), nullable=False)
+    base_url: Mapped[str] = mapped_column(String(1024), nullable=False)
+    model: Mapped[str] = mapped_column(String(255), nullable=False)
+    api_key_encrypted: Mapped[str] = mapped_column(Text, nullable=False)
+    system_prompt: Mapped[str] = mapped_column(Text, default='', server_default='', nullable=False)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True, server_default='1', nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), server_default=func.now(), nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc),
+        server_default=func.now(),
+        onupdate=lambda: datetime.now(timezone.utc),
+        nullable=False,
+    )
+
+
 class User(Base):
     __tablename__ = 'users'
     __table_args__ = (
@@ -240,6 +287,7 @@ class User(Base):
     owned_collections: Mapped[list['Collection']] = relationship(back_populates='owner')
     import_sources: Mapped[list['ImportSource']] = relationship(back_populates='owner', cascade='all, delete-orphan')
     import_runs: Mapped[list['ImportRun']] = relationship(back_populates='owner')
+    benchmark_runs: Mapped[list['BenchmarkRun']] = relationship(back_populates='owner')
     api_tokens: Mapped[list['ApiToken']] = relationship(back_populates='user', cascade='all, delete-orphan')
 
 
@@ -449,6 +497,46 @@ class ImportRun(Base):
     source: Mapped[ImportSource | None] = relationship(back_populates='runs')
     owner: Mapped[User | None] = relationship(back_populates='import_runs')
     jobs: Mapped[list[Job]] = relationship(back_populates='import_run')
+
+
+class BenchmarkRun(Base):
+    """One multi-variant document-conversion comparison: a single uploaded
+    file processed by 2-7 variants (VL connections and/or one OCR profile),
+    each as its own Job row linked via Job.benchmark_run_id. See
+    app/api/benchmarks.py for creation/report/export logic.
+
+    Child jobs bypass the normal duplicate-409/version-chain path entirely
+    (always document_version=1, previous_job_id=None) and are excluded from
+    GET /jobs and GET /search by construction -- see
+    app/api/routes.py's _apply_job_filters and _find_predecessor_job.
+    """
+
+    __tablename__ = 'benchmark_runs'
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    # NULL = owning user was later deleted (SET NULL), mirrors
+    # ImportRun.owner_id/Job.owner_id semantics.
+    owner_id: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey('users.id', ondelete='SET NULL'), nullable=True, index=True
+    )
+    original_filename: Mapped[str] = mapped_column(String(255), nullable=False)
+    content_sha256: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), server_default=func.now(), nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc),
+        server_default=func.now(),
+        onupdate=lambda: datetime.now(timezone.utc),
+        nullable=False,
+    )
+
+    owner: Mapped[User | None] = relationship(back_populates='benchmark_runs')
+    # No cascade -- ondelete=SET NULL at the DB level, same pattern as
+    # ImportRun.jobs. DELETE /benchmarks/{id} explicitly deletes each child
+    # Job itself before deleting the run (see app/api/benchmarks.py).
+    jobs: Mapped[list[Job]] = relationship(back_populates='benchmark_run')
 
 
 class JobArtifact(Base):

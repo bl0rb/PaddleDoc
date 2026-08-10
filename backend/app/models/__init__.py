@@ -2,6 +2,7 @@ from app.models.models import (
     ApiToken,
     AuthProvider,
     Base,
+    BenchmarkRun,
     Chunk,
     Collection,
     Document,
@@ -18,6 +19,7 @@ from app.models.models import (
     Team,
     User,
     UserRole,
+    VlConnection,
     WorkerLogEntry,
 )
 
@@ -25,6 +27,7 @@ __all__ = [
     'ApiToken',
     'AuthProvider',
     'Base',
+    'BenchmarkRun',
     'Chunk',
     'Collection',
     'Document',
@@ -41,5 +44,6 @@ __all__ = [
     'Team',
     'User',
     'UserRole',
+    'VlConnection',
     'WorkerLogEntry',
 ]

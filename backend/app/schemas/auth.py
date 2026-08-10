@@ -140,6 +140,48 @@ class ProviderTestResponse(BaseModel):
     token_endpoint: str | None = None
 
 
+class VlConnectionCreateRequest(BaseModel):
+    name: str = Field(min_length=1, max_length=255)
+    base_url: str = Field(min_length=1, max_length=1024)
+    model: str = Field(min_length=1, max_length=255)
+    api_key: str = Field(min_length=1, max_length=4096)
+    system_prompt: str = Field(default='', max_length=8000)
+    enabled: bool = True
+
+
+class VlConnectionUpdateRequest(BaseModel):
+    name: str | None = Field(default=None, min_length=1, max_length=255)
+    base_url: str | None = Field(default=None, min_length=1, max_length=1024)
+    model: str | None = Field(default=None, min_length=1, max_length=255)
+    # Write-only: omit or leave null to keep the existing stored key unchanged.
+    api_key: str | None = Field(default=None, min_length=1, max_length=4096)
+    system_prompt: str | None = Field(default=None, max_length=8000)
+    enabled: bool | None = None
+
+
+class VlConnectionAdminResponse(BaseModel):
+    id: str
+    name: str
+    base_url: str
+    model: str
+    # Never the key itself -- just whether one is on file.
+    has_api_key: bool
+    system_prompt: str
+    enabled: bool
+    created_at: datetime
+    updated_at: datetime
+
+
+class VlConnectionAdminListResponse(BaseModel):
+    items: list[VlConnectionAdminResponse]
+
+
+class VlConnectionTestResponse(BaseModel):
+    ok: bool
+    detail: str | None = None
+    latency_ms: int | None = None
+
+
 class ClaimOwnerlessRequest(BaseModel):
     owner_id: str = Field(min_length=1)
 

@@ -412,3 +412,79 @@ def test_0007_versioning_tokens_migration_upgrade_downgrade_round_trip(tmp_path,
     assert 'api_tokens' in insp.get_table_names()
     job_columns = {c['name'] for c in insp.get_columns('jobs')}
     assert {'content_sha256', 'document_version', 'previous_job_id'} <= job_columns
+
+
+def test_0008_vl_benchmarks_migration_upgrade_downgrade_round_trip(tmp_path, monkeypatch) -> None:
+    db_path = tmp_path / 'migration_scratch_0008.db'
+    db_url = f'sqlite:///{db_path}'
+    monkeypatch.setattr(settings, 'database_url', db_url)
+
+    engine = create_engine(db_url, future=True)
+    _build_legacy_metadata().create_all(bind=engine)
+
+    cfg = _alembic_config()
+    command.stamp(cfg, '0003_job_markdown_versions')
+
+    # --- upgrade (through 0004-0007 to 0008): vl_connections + benchmark_runs
+    # + jobs.benchmark_run_id ---
+    command.upgrade(cfg, 'head')
+
+    insp = inspect(engine)
+    tables = set(insp.get_table_names())
+    for expected in ('vl_connections', 'benchmark_runs'):
+        assert expected in tables, f'{expected} missing after upgrade'
+
+    vl_columns = {c['name'] for c in insp.get_columns('vl_connections')}
+    assert {
+        'id', 'name', 'base_url', 'model', 'api_key_encrypted', 'system_prompt',
+        'enabled', 'created_at', 'updated_at',
+    } <= vl_columns
+
+    run_columns = {c['name'] for c in insp.get_columns('benchmark_runs')}
+    assert {
+        'id', 'owner_id', 'original_filename', 'content_sha256', 'created_at', 'updated_at',
+    } <= run_columns
+
+    run_fks = insp.get_foreign_keys('benchmark_runs')
+    assert any(
+        fk['referred_table'] == 'users' and fk['constrained_columns'] == ['owner_id'] for fk in run_fks
+    ), run_fks
+    assert 'ix_benchmark_runs_owner_id' in {ix['name'] for ix in insp.get_indexes('benchmark_runs')}
+    assert 'ix_benchmark_runs_content_sha256' in {ix['name'] for ix in insp.get_indexes('benchmark_runs')}
+
+    job_columns = {c['name'] for c in insp.get_columns('jobs')}
+    assert 'benchmark_run_id' in job_columns
+    job_fks = insp.get_foreign_keys('jobs')
+    assert any(
+        fk['referred_table'] == 'benchmark_runs' and fk['constrained_columns'] == ['benchmark_run_id']
+        for fk in job_fks
+    ), job_fks
+    # The batch_alter_table rebuild must not have dropped earlier FKs.
+    assert any(fk['referred_table'] == 'users' and fk['constrained_columns'] == ['owner_id'] for fk in job_fks), job_fks
+    assert any(
+        fk['referred_table'] == 'jobs' and fk['constrained_columns'] == ['previous_job_id'] for fk in job_fks
+    ), job_fks
+
+    jobs_indexes = {ix['name'] for ix in insp.get_indexes('jobs')}
+    assert 'ix_jobs_benchmark_run_id' in jobs_indexes
+
+    # --- downgrade one revision: only the 0008 additions should disappear ---
+    command.downgrade(cfg, '0007_versioning_tokens')
+
+    insp = inspect(engine)
+    tables = set(insp.get_table_names())
+    for removed in ('vl_connections', 'benchmark_runs'):
+        assert removed not in tables, f'{removed} still present after downgrade'
+    job_columns = {c['name'] for c in insp.get_columns('jobs')}
+    assert 'benchmark_run_id' not in job_columns
+    # 0007's schema must survive a 0008-only downgrade untouched.
+    assert 'content_sha256' in job_columns
+    assert 'api_tokens' in tables
+
+    # --- re-upgrade: should cleanly re-apply from the 0007 baseline ---
+    command.upgrade(cfg, 'head')
+    insp = inspect(engine)
+    tables = set(insp.get_table_names())
+    for expected in ('vl_connections', 'benchmark_runs'):
+        assert expected in tables
+    assert 'benchmark_run_id' in {c['name'] for c in insp.get_columns('jobs')}

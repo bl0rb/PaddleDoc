@@ -8,6 +8,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [1.2.1] - 2026-08-06
 
 ### Added
+- VL benchmark: admins manage multiple vision-language connections (OpenAI-compatible
+  endpoint, model, write-only encrypted API key, per-connection system prompt, test button)
+  in a new admin tab; users benchmark a document against up to 6 VL connections plus
+  optionally one OCR profile (2-7 variants) on the new Benchmark page and get a comparison
+  report — duration, pages, output size, quality grade, fallback/error per variant — with
+  per-variant markdown preview and JSON export. Benchmark variants are processed as regular
+  jobs but stay out of the jobs list, stats, folders, and document versioning (#57)
 - Document versioning via content hash: every upload stores a SHA-256 of the file; uploading
   a same-named file visible to the same team creates version N+1 linked to its predecessor,
   byte-identical re-uploads are rejected with a pointer to the existing version instead of

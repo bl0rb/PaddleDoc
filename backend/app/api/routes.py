@@ -125,6 +125,7 @@ def _job_to_response(job: Job) -> JobResponse:
         content_sha256=job.content_sha256,
         document_version=job.document_version,
         previous_job_id=job.previous_job_id,
+        benchmark_run_id=job.benchmark_run_id,
         created_at=job.created_at,
         updated_at=job.updated_at,
     )
@@ -151,6 +152,14 @@ def _visible_job_filter(user: User):
 
 
 def _apply_visible_filter(query, user: User):
+    # Benchmark-variant children (see app/api/benchmarks.py) are excluded
+    # here for the same reason `_apply_job_filters` excludes them: every
+    # browse/aggregate surface built on this helper (/stats,
+    # /markdown-files, /folders/* download-restart-delete, collections)
+    # must never treat them as normal documents -- they bypass the
+    # duplicate-409/version-chain logic and are surfaced only via GET
+    # /benchmarks/*, though each stays individually fetchable by id.
+    query = query.where(Job.benchmark_run_id.is_(None))
     visible_filter = _visible_job_filter(user)
     if visible_filter is not None:
         query = query.where(visible_filter)
@@ -195,6 +204,14 @@ def _apply_job_filters(
     status_filter: JobStatus | None = None,
     visible_filter=None,
 ):
+    # Benchmark-variant children (see app/api/benchmarks.py) are excluded
+    # from every normal job listing by construction -- both GET /jobs
+    # (_job_query) and GET /search's total (_job_count) go through this
+    # helper. They remain individually fetchable by id (GET /jobs/{id},
+    # /preview, /download, /export.json) and are surfaced instead via
+    # GET /benchmarks/{id}.
+    query = query.where(Job.benchmark_run_id.is_(None))
+
     if q:
         pattern = f'%{q.strip().lower()}%'
         query = query.where(func.lower(Job.original_filename).like(pattern))
@@ -283,6 +300,26 @@ def _is_import_page_job(job: Job) -> bool:
     info = job.processing_info if isinstance(job.processing_info, dict) else {}
     settings_info = info.get('settings') if isinstance(info.get('settings'), dict) else {}
     return settings_info.get('mode') == 'import'
+
+
+def _reject_benchmark_child_job(job: Job) -> None:
+    """Benchmark-variant children (Job.benchmark_run_id set, see
+    app/api/benchmarks.py) may only be deleted/restarted through the owning
+    benchmark run's own control surface (DELETE /benchmarks/{id}), which
+    gates on run-owner-or-admin via _require_benchmark_control. The general
+    job endpoints below instead apply ordinary owner/teammate *visibility*
+    (see _require_visible) -- without this guard, any teammate who can only
+    *see* someone else's benchmark run (read != control, same distinction
+    benchmarks.py draws) could delete or restart one of its variant jobs out
+    from under the run owner via the pre-existing single-job endpoints,
+    silently corrupting a run they don't control. Applies regardless of
+    caller, including the run owner/admin themselves -- they still go
+    through the benchmark endpoint so the run's job set stays consistent."""
+    if job.benchmark_run_id is not None:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail='This job is part of a benchmark run; manage it via the benchmark.',
+        )
 
 
 def _content_disposition(disposition: str, filename: str) -> str:
@@ -511,9 +548,12 @@ def _find_predecessor_job(db: Session, user: User, filename: str) -> Job | None:
     (same row-visibility rule as `_visible_job_filter`) -- the highest
     document_version, tie-broken by newest created_at. Used both to compute
     the next version number on upload and to detect an exact re-upload via
-    content_sha256 (see DuplicateUploadError)."""
+    content_sha256 (see DuplicateUploadError). Benchmark-variant children
+    are never candidates -- `_apply_visible_filter` excludes them."""
     query = _apply_visible_filter(
-        select(Job).where(Job.original_filename == filename).options(*_JOB_BLOB_DEFER_OPTIONS),
+        select(Job)
+        .where(Job.original_filename == filename)
+        .options(*_JOB_BLOB_DEFER_OPTIONS),
         user,
     )
     query = query.order_by(Job.document_version.desc(), Job.created_at.desc())
@@ -535,6 +575,7 @@ def create_job_from_upload(
     tags: list[str],
     extra_settings: dict | None = None,
     password_hash: str | None = None,
+    benchmark_run_id: str | None = None,
 ) -> Job:
     """Shared job-creation path for both the single-file (`/upload`) and
     collection (`/collections/{id}/upload`) upload handlers, previously
@@ -546,16 +587,24 @@ def create_job_from_upload(
     once it's done with any other work for the same request (e.g. tracking
     the job against a collection).
 
+    `benchmark_run_id` (set only by POST /benchmarks, see app/api/
+    benchmarks.py) makes this a benchmark-variant child: the predecessor
+    lookup and duplicate-409/version-chain logic are skipped entirely --
+    uploading the same bytes twice as separate benchmark variants (or as a
+    variant AND a normal upload) is expected, not an error -- and the job is
+    always document_version=1 with no previous_job_id.
+
     Raises DuplicateUploadError (before any Job row is added) if the content
     hash exactly matches the latest version of a same-named document already
     visible to `user`; the just-written upload file is removed in that case.
+    Never raised when `benchmark_run_id` is set.
     """
     file_id = storage_folder.rsplit('/', 1)[-1]
     upload_path, _, upload_content, upload_size = save_upload(file, storage_folder, file_id)
     content_sha256 = hashlib.sha256(upload_content).hexdigest()
 
     filename = file.filename or 'upload'
-    predecessor = _find_predecessor_job(db, user, filename)
+    predecessor = None if benchmark_run_id else _find_predecessor_job(db, user, filename)
 
     if predecessor is not None and predecessor.content_sha256 == content_sha256:
         uploaded_file = Path(upload_path).resolve()
@@ -579,6 +628,7 @@ def create_job_from_upload(
         content_sha256=content_sha256,
         document_version=(predecessor.document_version + 1) if predecessor else 1,
         previous_job_id=predecessor.id if predecessor else None,
+        benchmark_run_id=benchmark_run_id,
     )
     job.processing_info = _base_processing_info(
         mode=mode,
@@ -1073,6 +1123,7 @@ def restart_job(job_id: str, request: Request, db: Session = Depends(get_db), us
     if job is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail='Job not found')
     _require_visible(db, job, user)
+    _reject_benchmark_child_job(job)
     if _is_import_page_job(job):
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail='Imported pages cannot be restarted')
 
@@ -1122,6 +1173,7 @@ def retry_job_with_lower_profile(
     if job is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail='Job not found')
     _require_visible(db, job, user)
+    _reject_benchmark_child_job(job)
     if _is_import_page_job(job):
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail='Imported pages cannot be restarted')
 
@@ -1573,6 +1625,7 @@ def delete_job(
     if job is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail='Job not found')
     _require_visible(db, job, user)
+    _reject_benchmark_child_job(job)
 
     _check_job_password(job, password)
 

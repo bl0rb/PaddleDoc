@@ -6,6 +6,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.api.auth import router_admin as auth_admin_router
 from app.api.auth import router_authenticated as auth_authenticated_router
 from app.api.auth import router_public as auth_public_router
+from app.api.benchmarks import router as benchmarks_router
 from app.api.deps import get_current_user, origin_guard
 from app.api.import_routes import router as import_router
 from app.api.routes import router
@@ -59,3 +60,7 @@ app.include_router(router, dependencies=[Depends(get_current_user), Depends(orig
 # Confluence import surface (/api/v1/import/...): same session + CSRF gate as
 # the main router; the module itself adds the IMPORT_ENABLED kill-switch.
 app.include_router(import_router, dependencies=[Depends(get_current_user), Depends(origin_guard)])
+
+# Benchmark runs + user-facing VL-connections list: same session + CSRF gate
+# as the main router, no separate kill-switch.
+app.include_router(benchmarks_router, dependencies=[Depends(get_current_user), Depends(origin_guard)])

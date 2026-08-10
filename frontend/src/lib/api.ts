@@ -194,3 +194,134 @@ export interface ApiTokenCreateResponse {
   created_at: string;
   expires_at: string | null;
 }
+
+/* -------------------------------------------------------------------------
+ * Benchmarks — run the same document through multiple VL connections (and
+ * optionally a baseline OCR profile) and compare output quality. Field
+ * names mirror the backend benchmark schema exactly.
+ * ---------------------------------------------------------------------- */
+
+/** GET /api/v1/vl-connections — enabled connections only, no key material. */
+export interface VLConnection {
+  id: string;
+  name: string;
+  model: string;
+}
+
+/** GET /api/v1/vl-connections */
+export interface VLConnectionListResponse {
+  items: VLConnection[];
+}
+
+/** Computed live from child job statuses — see GET /api/v1/benchmarks for the derivation rule. */
+export type BenchmarkRunStatus = 'pending' | 'running' | 'completed' | 'failed';
+
+export type BenchmarkVariantStatus = 'PENDING' | 'RUNNING' | 'FINISHED' | 'FAILED';
+
+/** 'vl' = a VL connection variant, 'ocr' = the optional baseline OCR-profile variant. */
+export type BenchmarkVariantKind = 'vl' | 'ocr';
+
+export interface BenchmarkOwner {
+  id: string;
+  username: string;
+}
+
+/** Row of GET /api/v1/benchmarks. */
+export interface BenchmarkRun {
+  id: string;
+  original_filename: string;
+  status: BenchmarkRunStatus;
+  variant_count: number;
+  created_at: string;
+  updated_at: string;
+  owner: BenchmarkOwner | null;
+}
+
+/** GET /api/v1/benchmarks */
+export interface BenchmarkRunListResponse {
+  items: BenchmarkRun[];
+}
+
+/** Lightweight, status-only variant entry — safe to poll (no markdown). */
+export interface BenchmarkVariantSummary {
+  job_id: string;
+  label: string;
+  kind: BenchmarkVariantKind;
+  status: BenchmarkVariantStatus;
+  error_message: string | null;
+}
+
+/** GET /api/v1/benchmarks/{id} and the response of POST /api/v1/benchmarks. */
+export interface BenchmarkRunDetail extends BenchmarkRun {
+  content_sha256: string;
+  variants: BenchmarkVariantSummary[];
+}
+
+/** Variant entry within GET /api/v1/benchmarks/{id}/report — heavier than {@link BenchmarkVariantSummary}, carries metrics. */
+export interface BenchmarkReportVariant {
+  job_id: string;
+  label: string;
+  kind: BenchmarkVariantKind;
+  status: BenchmarkVariantStatus;
+  duration_seconds: number | null;
+  page_count: number | null;
+  output_chars: number | null;
+  quality_grade: 'A' | 'B' | 'C' | null;
+  used_fallback: boolean | null;
+  error: string | null;
+}
+
+export interface BenchmarkReportSummary {
+  fastest_variant_job_id: string | null;
+  highest_quality_variant_job_id: string | null;
+}
+
+/** GET /api/v1/benchmarks/{id}/report — always 200; populated fields grow as variants finish, check `all_terminal`. */
+export interface BenchmarkReport {
+  id: string;
+  original_filename: string;
+  status: BenchmarkRunStatus;
+  all_terminal: boolean;
+  created_at: string;
+  variants: BenchmarkReportVariant[];
+  summary: BenchmarkReportSummary;
+}
+
+/** DELETE /api/v1/benchmarks/{id} */
+export interface BenchmarkDeleteResponse {
+  id: string;
+  deleted_jobs: number;
+}
+
+/** Server caps: 0..6 vl_connection_ids, and 2..7 total variants (vl_connection_ids + optional profile_id). */
+export const MAX_VL_CONNECTIONS = 6;
+export const MIN_BENCHMARK_VARIANTS = 2;
+export const MAX_BENCHMARK_VARIANTS = 7;
+
+const BENCHMARK_ACTIVE_STATUSES: BenchmarkRunStatus[] = ['pending', 'running'];
+
+export function isBenchmarkRunActive(status: BenchmarkRunStatus): boolean {
+  return BENCHMARK_ACTIVE_STATUSES.includes(status);
+}
+
+/** Status chip classes — restricted to the app's emerald/slate/amber/red palette. */
+export const benchmarkStatusChip: Record<BenchmarkRunStatus, string> = {
+  pending: 'bg-slate-100 text-slate-700',
+  running: 'bg-amber-100 text-amber-800',
+  completed: 'bg-emerald-100 text-emerald-800',
+  failed: 'bg-red-100 text-red-700',
+};
+
+export const benchmarkVariantStatusChip: Record<BenchmarkVariantStatus, string> = {
+  PENDING: 'bg-slate-100 text-slate-700',
+  RUNNING: 'bg-amber-100 text-amber-800',
+  FINISHED: 'bg-emerald-100 text-emerald-800',
+  FAILED: 'bg-red-100 text-red-700',
+};
+
+/** quality_gate.py never emits D/F — A/B/C is exhaustive. */
+export const qualityGradeChip: Record<'A' | 'B' | 'C', string> = {
+  A: 'bg-emerald-50 text-emerald-700',
+  B: 'bg-amber-50 text-amber-700',
+  C: 'bg-red-50 text-red-700',
+};

@@ -62,6 +62,7 @@ class JobResponse(BaseModel):
     content_sha256: str | None = None
     document_version: int = 1
     previous_job_id: str | None = None
+    benchmark_run_id: str | None = None
     created_at: datetime
     updated_at: datetime
 

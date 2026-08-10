@@ -9,13 +9,18 @@ from sqlalchemy import select, update
 
 from app.core.config import settings
 from app.database.session import SessionLocal
-from app.models.models import ImportRun, ImportRunStatus, Job, JobStatus, Team, User
+from app.models.models import ImportRun, ImportRunStatus, Job, JobStatus, Team, User, VlConnection
 from app.services.paddle_service import (
     convert_to_markdown_with_details,
     get_paddle_settings,
     get_runtime_capability,
     is_paddle_available,
 )
+# Module-object import (security.decrypt_vl_api_key) rather than a
+# from-import: matches import_tasks.py's late-binding convention for
+# security.decrypt_import_credential, keeping the helper monkeypatchable in
+# tests.
+from app.services import security
 from app.services.storage import build_result_path, ensure_storage_dirs
 from app.workers.celery_app import celery_app
 
@@ -294,7 +299,38 @@ def process_job(
         capability = get_runtime_capability()
         existing_info = job.processing_info if isinstance(job.processing_info, dict) else {}
         existing_settings = existing_info.get('settings') if isinstance(existing_info.get('settings'), dict) else {}
-        execution_payload = {'status': 'running'}
+
+        # Benchmark variant jobs (see app/api/benchmarks.py) stamp
+        # vl_connection_id into settings at creation time; every other job
+        # leaves it unset and vl_override stays None, which is a no-op for
+        # every non-openai_vision profile and byte-identical to the
+        # env-based openai_vision path when it IS the profile.
+        vl_connection_id = existing_settings.get('vl_connection_id') if isinstance(existing_settings, dict) else None
+        vl_override: dict[str, str] | None = None
+        if vl_connection_id:
+            vl_conn = db.get(VlConnection, vl_connection_id)
+            if vl_conn is None or not vl_conn.enabled:
+                job.status = JobStatus.FAILED
+                job.error_message = 'VL connection is no longer available'
+                job.processing_info = {
+                    **job.processing_info,
+                    'execution': {'status': 'failed', 'error': job.error_message},
+                }
+                db.commit()
+                return
+            vl_override = {
+                'base_url': vl_conn.base_url,
+                'api_key': security.decrypt_vl_api_key(vl_conn.api_key_encrypted),
+                'model': vl_conn.model,
+                'system_prompt': vl_conn.system_prompt,
+                # Used by paddle_service to label user-facing error messages
+                # (job.error_message, benchmark report/export) instead of the
+                # admin-configured base_url -- see
+                # paddle_service._call_vision_chat_api's docstring.
+                'name': vl_conn.name,
+            }
+
+        execution_payload = {'status': 'running', 'started_at': now.isoformat()}
         job.processing_info = {
             'settings': {
                 **existing_settings,
@@ -335,6 +371,7 @@ def process_job(
         markdown, details = convert_to_markdown_with_details(
             str(upload_path),
             profile_id=effective_profile_id,
+            vl_override=vl_override,
             metadata={
                 'mode': mode or 'single',
                 'email': email or '',
@@ -360,25 +397,39 @@ def process_job(
         result_path.unlink(missing_ok=True)
         result_path.write_text(markdown, encoding='utf-8')
 
+        finished_now = datetime.now(timezone.utc)
         job.status = JobStatus.FINISHED
         job.result_path = str(result_path)
         job.result_markdown = markdown
         existing = job.processing_info if isinstance(job.processing_info, dict) else {}
         job.processing_info = {
             **existing,
-            'execution': {'status': 'finished', **details},
+            'execution': {
+                'status': 'finished',
+                **details,
+                'started_at': now.isoformat(),
+                'finished_at': finished_now.isoformat(),
+                'duration_seconds': round((finished_now - now).total_seconds(), 3),
+            },
         }
         job.error_message = None
         db.commit()
     except Exception as exc:  # pragma: no cover
         job = db.get(Job, job_id)
         if job is not None:
+            failed_now = datetime.now(timezone.utc)
             job.status = JobStatus.FAILED
             job.error_message = str(exc)
             existing = job.processing_info if isinstance(job.processing_info, dict) else {}
             job.processing_info = {
                 **existing,
-                'execution': {'status': 'failed', 'error': str(exc)},
+                'execution': {
+                    'status': 'failed',
+                    'error': str(exc),
+                    'started_at': now.isoformat(),
+                    'finished_at': failed_now.isoformat(),
+                    'duration_seconds': round((failed_now - now).total_seconds(), 3),
+                },
             }
             db.commit()
     finally:

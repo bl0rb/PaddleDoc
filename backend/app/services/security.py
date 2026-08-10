@@ -199,6 +199,7 @@ def hash_session_token(token: str) -> str:
 
 _OIDC_CLIENT_SECRET_HKDF_INFO = b'oidc-client-secret'
 _IMPORT_CREDENTIAL_HKDF_INFO = b'import-source-credential'
+_VL_CONNECTION_API_KEY_HKDF_INFO = b'vl-connection-api-key'
 
 
 def _derive_fernet_key(info: bytes) -> bytes:
@@ -262,6 +263,33 @@ def decrypt_import_credential(ciphertext: str) -> str:
         return fernet.decrypt(ciphertext.encode('utf-8')).decode('utf-8')
     except InvalidToken as exc:
         raise ValueError('import credential could not be decrypted (wrong SECRET_KEY or corrupted value)') from exc
+
+
+# --- VL connection API key encryption ----------------------------------------
+#
+# Same Fernet-over-HKDF pattern as OIDC client secrets / import credentials,
+# under its own info label. vl_connections.api_key_encrypted is write-only at
+# the API; the plaintext exists only inside the admin /test endpoint and the
+# worker's benchmark job dispatch (see app/workers/tasks.py).
+
+def encrypt_vl_api_key(plaintext: str) -> str:
+    """Fernet-encrypt a VL connection API key for storage in
+    vl_connections.api_key_encrypted."""
+    fernet = Fernet(_derive_fernet_key(_VL_CONNECTION_API_KEY_HKDF_INFO))
+    return fernet.encrypt(plaintext.encode('utf-8')).decode('utf-8')
+
+
+def decrypt_vl_api_key(ciphertext: str) -> str:
+    """Inverse of encrypt_vl_api_key.
+
+    Raises ValueError if the ciphertext is malformed/tampered, or was
+    encrypted under a different SECRET_KEY (e.g. after a key rotation).
+    """
+    fernet = Fernet(_derive_fernet_key(_VL_CONNECTION_API_KEY_HKDF_INFO))
+    try:
+        return fernet.decrypt(ciphertext.encode('utf-8')).decode('utf-8')
+    except InvalidToken as exc:
+        raise ValueError('VL connection API key could not be decrypted (wrong SECRET_KEY or corrupted value)') from exc
 
 
 # --- Short-lived signed cookie values (OIDC state/nonce/PKCE) --------------
