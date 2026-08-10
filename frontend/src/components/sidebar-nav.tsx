@@ -3,7 +3,7 @@
 import { useEffect, useRef, useState } from 'react';
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
-import { Home, Menu, X, Cpu, FolderOpen, Shield, LogOut } from 'lucide-react';
+import { Home, Menu, X, Cpu, FolderOpen, Settings, Shield, LogOut } from 'lucide-react';
 import { useAuth } from '@/lib/auth-context';
 
 const links = [
@@ -95,6 +95,24 @@ export function SidebarNav() {
         <div className="border-t border-slate-100 px-3 py-3">
           {user ? (
             <>
+              <Link
+                href="/settings"
+                onClick={() => setOpen(false)}
+                className={`mb-2 flex items-center gap-3 rounded-xl px-3 py-2.5 text-sm font-medium transition ${
+                  pathname === '/settings' || pathname.startsWith('/settings/')
+                    ? 'bg-emerald-50 text-emerald-800'
+                    : 'text-slate-600 hover:bg-slate-50 hover:text-slate-950'
+                }`}
+              >
+                <Settings
+                  className={`h-4 w-4 flex-shrink-0 ${
+                    pathname === '/settings' || pathname.startsWith('/settings/')
+                      ? 'text-emerald-700'
+                      : 'text-slate-400'
+                  }`}
+                />
+                Settings
+              </Link>
               {user.role === 'admin' && (
                 <Link
                   href="/admin"

@@ -10,16 +10,33 @@ import { apiFetch } from '@/lib/api';
 import { peekCached, setCached, useCachedResource } from '@/lib/data-cache';
 import {
   API,
+  type DuplicateUploadBody,
   type FolderOptions,
   type Job,
   type PaddleCapabilities,
   type PaddleSettings,
   type UploadMode,
   type UploadProgress,
+  UploadError,
   buildFolderOptions,
   formatBytes,
   sendFormDataWithProgress,
 } from './shared';
+
+/** Existing version number from a 409 duplicate-upload response, if present. */
+function duplicateUploadVersion(error: UploadError): number | null {
+  const body = error.body as Partial<DuplicateUploadBody> | null;
+  return typeof body?.existing_version === 'number' ? body.existing_version : null;
+}
+
+/** Friendly message for a 409 duplicate-upload response (falls back to the raw detail). */
+function duplicateUploadMessage(fileName: string, error: UploadError): string {
+  const version = duplicateUploadVersion(error);
+  if (version === null) {
+    return error.message;
+  }
+  return `Unchanged file: "${fileName}" is identical to version ${version} of this document — no new job created.`;
+}
 
 const JOBS_KEY = '/api/v1/jobs';
 const PADDLE_SETTINGS_KEY = '/api/v1/paddle/settings';
@@ -164,8 +181,12 @@ export function ProcessingFlow() {
       await refreshFolderOptions();
       router.push('/jobs');
     } catch (error) {
-      const detail = error instanceof Error ? error.message : 'Single upload failed. Please verify the file type.';
-      setFlowMessage(detail);
+      if (error instanceof UploadError && error.status === 409) {
+        setFlowMessage(duplicateUploadMessage(file.name, error));
+      } else {
+        const detail = error instanceof Error ? error.message : 'Single upload failed. Please verify the file type.';
+        setFlowMessage(detail);
+      }
     } finally {
       setUploadProgress(null);
       setBusy(false);
@@ -204,6 +225,7 @@ export function ProcessingFlow() {
     try {
       const id = await ensureCollection();
       const uploadedNames: string[] = [];
+      const skippedDuplicates: { name: string; version: number | null }[] = [];
       const fileList = Array.from(files);
       const totalBytes = fileList.reduce((sum, entry) => sum + (entry.size || 0), 0) || 1;
       let completedBytes = 0;
@@ -233,8 +255,12 @@ export function ProcessingFlow() {
             });
           });
         } catch (error) {
-          const detail = error instanceof Error ? error.message : 'upload failed';
-          setFlowMessage(`Failed to upload ${file.name}: ${detail}`);
+          if (error instanceof UploadError && error.status === 409) {
+            skippedDuplicates.push({ name: file.name, version: duplicateUploadVersion(error) });
+          } else {
+            const detail = error instanceof Error ? error.message : 'upload failed';
+            setFlowMessage(`Failed to upload ${file.name}: ${detail}`);
+          }
           continue;
         }
         uploadedNames.push(file.name);
@@ -242,7 +268,21 @@ export function ProcessingFlow() {
       }
       if (uploadedNames.length > 0) {
         setCollectionFiles((prev) => [...prev, ...uploadedNames]);
-        setFlowMessage(`${uploadedNames.length} file(s) uploaded to collection.`);
+      }
+      if (uploadedNames.length > 0 || skippedDuplicates.length > 0) {
+        const parts: string[] = [];
+        if (uploadedNames.length > 0) {
+          parts.push(`${uploadedNames.length} file(s) uploaded to collection.`);
+        }
+        if (skippedDuplicates.length > 0) {
+          const details = skippedDuplicates
+            .map(({ name, version }) => (version === null ? name : `${name} (v${version})`))
+            .join(', ');
+          parts.push(
+            `${skippedDuplicates.length} unchanged file(s) skipped (identical to existing versions): ${details}.`,
+          );
+        }
+        setFlowMessage(parts.join(' '));
       }
       await refreshFolderOptions();
     } finally {

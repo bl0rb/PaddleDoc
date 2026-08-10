@@ -320,3 +320,95 @@ def test_0006_worker_logs_migration_upgrade_downgrade_round_trip(tmp_path, monke
     command.upgrade(cfg, 'head')
     insp = inspect(engine)
     assert 'worker_log_entries' in insp.get_table_names()
+
+
+def test_0007_versioning_tokens_migration_upgrade_downgrade_round_trip(tmp_path, monkeypatch) -> None:
+    db_path = tmp_path / 'migration_scratch_0007.db'
+    db_url = f'sqlite:///{db_path}'
+    monkeypatch.setattr(settings, 'database_url', db_url)
+
+    engine = create_engine(db_url, future=True)
+    _build_legacy_metadata().create_all(bind=engine)
+
+    cfg = _alembic_config()
+    command.stamp(cfg, '0003_job_markdown_versions')
+
+    # --- upgrade to just before 0007, then insert a pre-existing job row the
+    # "old" way (no content_sha256/document_version/previous_job_id columns
+    # exist yet at this point) -- this is what actually proves 0007's
+    # server_default backfills real legacy rows, rather than a row inserted
+    # after the columns already exist. ---
+    command.upgrade(cfg, '0006_worker_logs')
+    with engine.begin() as conn:
+        conn.execute(text(
+            "INSERT INTO jobs (id, original_filename, upload_path, status, created_at, updated_at) "
+            "VALUES ('legacy-job-1', 'legacy.pdf', '/tmp/legacy.pdf', 'PENDING', '2026-01-01', '2026-01-01')"
+        ))
+
+    # --- upgrade (0007): jobs columns + api_tokens ---
+    command.upgrade(cfg, 'head')
+
+    insp = inspect(engine)
+    assert 'api_tokens' in insp.get_table_names()
+
+    job_columns = {c['name'] for c in insp.get_columns('jobs')}
+    assert {'content_sha256', 'document_version', 'previous_job_id'} <= job_columns
+
+    job_fks = insp.get_foreign_keys('jobs')
+    assert any(
+        fk['referred_table'] == 'jobs' and fk['constrained_columns'] == ['previous_job_id'] for fk in job_fks
+    ), job_fks
+    # The batch_alter_table rebuild must not have dropped earlier FKs.
+    assert any(fk['referred_table'] == 'users' and fk['constrained_columns'] == ['owner_id'] for fk in job_fks), job_fks
+    assert any(
+        fk['referred_table'] == 'import_runs' and fk['constrained_columns'] == ['import_run_id'] for fk in job_fks
+    ), job_fks
+
+    jobs_indexes = {ix['name'] for ix in insp.get_indexes('jobs')}
+    assert {'ix_jobs_content_sha256', 'ix_jobs_previous_job_id'} <= jobs_indexes
+
+    token_columns = {c['name'] for c in insp.get_columns('api_tokens')}
+    assert {
+        'id', 'user_id', 'name', 'token_hash', 'token_prefix',
+        'created_at', 'last_used_at', 'expires_at',
+    } <= token_columns
+
+    token_fks = insp.get_foreign_keys('api_tokens')
+    assert any(
+        fk['referred_table'] == 'users' and fk['constrained_columns'] == ['user_id'] for fk in token_fks
+    ), token_fks
+
+    token_indexes = {ix['name'] for ix in insp.get_indexes('api_tokens')}
+    assert {'ix_api_tokens_user_id', 'ix_api_tokens_token_hash'} <= token_indexes
+
+    token_uniques = insp.get_unique_constraints('api_tokens')
+    assert any(uc['name'] == 'uq_api_tokens_token_hash' for uc in token_uniques), token_uniques
+
+    # The NOT-NULL document_version column (added with a server_default) must
+    # have backfilled the row inserted before 0007 ran; content_sha256 and
+    # previous_job_id are nullable additions, so the legacy row gets NULL for
+    # both rather than any synthesized value.
+    with engine.begin() as conn:
+        row = conn.execute(text(
+            "SELECT document_version, content_sha256, previous_job_id FROM jobs WHERE id = 'legacy-job-1'"
+        )).one()
+        assert row.document_version == 1
+        assert row.content_sha256 is None
+        assert row.previous_job_id is None
+
+    # --- downgrade one revision: only the 0007 additions should disappear ---
+    command.downgrade(cfg, '0006_worker_logs')
+
+    insp = inspect(engine)
+    assert 'api_tokens' not in insp.get_table_names()
+    job_columns = {c['name'] for c in insp.get_columns('jobs')}
+    assert not ({'content_sha256', 'document_version', 'previous_job_id'} & job_columns)
+    # 0006's schema must survive a 0007-only downgrade untouched.
+    assert 'worker_log_entries' in insp.get_table_names()
+
+    # --- re-upgrade: should cleanly re-apply from the 0006 baseline ---
+    command.upgrade(cfg, 'head')
+    insp = inspect(engine)
+    assert 'api_tokens' in insp.get_table_names()
+    job_columns = {c['name'] for c in insp.get_columns('jobs')}
+    assert {'content_sha256', 'document_version', 'previous_job_id'} <= job_columns

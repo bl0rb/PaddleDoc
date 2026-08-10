@@ -1,3 +1,4 @@
+import hashlib
 import uuid
 from datetime import date, datetime, time, timezone
 import io
@@ -7,7 +8,7 @@ from urllib.parse import quote
 import zipfile
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Request, UploadFile, status
-from fastapi.responses import FileResponse, PlainTextResponse, Response, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, Response, StreamingResponse
 from redis import Redis
 from sqlalchemy import func, or_, select, text
 from sqlalchemy.orm import Session, defer
@@ -15,7 +16,7 @@ from sqlalchemy.orm import Session, defer
 from app.api.deps import get_current_user, require_admin
 from app.core.config import settings
 from app.database.session import get_db
-from app.models.models import Collection, Job, JobArtifact, JobMarkdownVersion, JobStatus, Tag, User, UserRole
+from app.models.models import Collection, Job, JobArtifact, JobMarkdownVersion, JobStatus, Tag, Team, User, UserRole
 from app.schemas.jobs import (
     ContainerState,
     CollectionCreateRequest,
@@ -25,6 +26,8 @@ from app.schemas.jobs import (
     DashboardStatsResponse,
     FolderActionRequest,
     FolderActionResponse,
+    JobVersionEntry,
+    JobVersionsResponse,
     MarkdownBrowserResponse,
     MarkdownFileEntry,
     JobListResponse,
@@ -119,6 +122,9 @@ def _job_to_response(job: Job) -> JobResponse:
         tags=[tag.name for tag in job.tags],
         error_message=job.error_message,
         processing_info=job.processing_info,
+        content_sha256=job.content_sha256,
+        document_version=job.document_version,
+        previous_job_id=job.previous_job_id,
         created_at=job.created_at,
         updated_at=job.updated_at,
     )
@@ -477,11 +483,48 @@ def _attach_tags(db: Session, job: Job, tags: list[str]) -> None:
             job.tags.append(tag_obj)
 
 
+class DuplicateUploadError(Exception):
+    """Raised by create_job_from_upload when the uploaded bytes are an exact
+    sha256 match for the latest version of a same-named document already
+    visible to the uploading user. No Job row, upload file, or result
+    directory is left behind for this attempt -- callers turn this into a
+    409 JSONResponse via `_duplicate_upload_response` (see FEATURE 1: content
+    hash + document versioning)."""
+
+    def __init__(self, predecessor: Job) -> None:
+        self.predecessor = predecessor
+
+
+def _duplicate_upload_response(predecessor: Job) -> JSONResponse:
+    return JSONResponse(
+        status_code=status.HTTP_409_CONFLICT,
+        content={
+            'detail': f'Identical file content already processed as version {predecessor.document_version} of this document',
+            'duplicate_of': predecessor.id,
+            'existing_version': predecessor.document_version,
+        },
+    )
+
+
+def _find_predecessor_job(db: Session, user: User, filename: str) -> Job | None:
+    """Latest version of a document named `filename` visible to `user`
+    (same row-visibility rule as `_visible_job_filter`) -- the highest
+    document_version, tie-broken by newest created_at. Used both to compute
+    the next version number on upload and to detect an exact re-upload via
+    content_sha256 (see DuplicateUploadError)."""
+    query = _apply_visible_filter(
+        select(Job).where(Job.original_filename == filename).options(*_JOB_BLOB_DEFER_OPTIONS),
+        user,
+    )
+    query = query.order_by(Job.document_version.desc(), Job.created_at.desc())
+    return db.scalars(query).first()
+
+
 def create_job_from_upload(
     db: Session,
     file: UploadFile,
     *,
-    owner_id: str,
+    user: User,
     storage_folder: str,
     mode: str,
     email: str,
@@ -502,14 +545,29 @@ def create_job_from_upload(
     and the id in the DB never disagree. Does not commit; the caller commits
     once it's done with any other work for the same request (e.g. tracking
     the job against a collection).
+
+    Raises DuplicateUploadError (before any Job row is added) if the content
+    hash exactly matches the latest version of a same-named document already
+    visible to `user`; the just-written upload file is removed in that case.
     """
     file_id = storage_folder.rsplit('/', 1)[-1]
     upload_path, _, upload_content, upload_size = save_upload(file, storage_folder, file_id)
+    content_sha256 = hashlib.sha256(upload_content).hexdigest()
+
+    filename = file.filename or 'upload'
+    predecessor = _find_predecessor_job(db, user, filename)
+
+    if predecessor is not None and predecessor.content_sha256 == content_sha256:
+        uploaded_file = Path(upload_path).resolve()
+        uploaded_file.unlink(missing_ok=True)
+        _cleanup_empty_parents(uploaded_file, settings.uploads_dir.resolve())
+        raise DuplicateUploadError(predecessor)
+
     result_path = build_result_path(storage_folder, file_id)
 
     job = Job(
         id=file_id,
-        original_filename=file.filename or 'upload',
+        original_filename=filename,
         upload_path=upload_path,
         upload_content=upload_content,
         upload_mime_type=file.content_type,
@@ -517,7 +575,10 @@ def create_job_from_upload(
         status=JobStatus.PENDING,
         result_path=str(result_path),
         password_hash=password_hash,
-        owner_id=owner_id,
+        owner_id=user.id,
+        content_sha256=content_sha256,
+        document_version=(predecessor.document_version + 1) if predecessor else 1,
+        previous_job_id=predecessor.id if predecessor else None,
     )
     job.processing_info = _base_processing_info(
         mode=mode,
@@ -662,21 +723,24 @@ def upload_document_to_collection(
     subfolder_value = subfolder.strip() or collection.subfolder or ''
     storage_folder = _storage_folder(file_id, folder_value, subfolder_value)
 
-    job = create_job_from_upload(
-        db,
-        file,
-        owner_id=user.id,
-        storage_folder=storage_folder,
-        mode='collection',
-        email=collection.email,
-        department=collection.department,
-        profile_id=None,
-        folder=folder_value or None,
-        subfolder=subfolder_value or None,
-        tags=_parse_tags(tags),
-        extra_settings={'collection_id': collection_id},
-        password_hash=collection.password_hash,
-    )
+    try:
+        job = create_job_from_upload(
+            db,
+            file,
+            user=user,
+            storage_folder=storage_folder,
+            mode='collection',
+            email=collection.email,
+            department=collection.department,
+            profile_id=None,
+            folder=folder_value or None,
+            subfolder=subfolder_value or None,
+            tags=_parse_tags(tags),
+            extra_settings={'collection_id': collection_id},
+            password_hash=collection.password_hash,
+        )
+    except DuplicateUploadError as exc:
+        return _duplicate_upload_response(exc.predecessor)
     db.commit()
 
     return UploadResponse(job_id=job.id, status=job.status)
@@ -758,20 +822,23 @@ def upload_document(
     file_id = str(uuid.uuid4())
     storage_folder = _storage_folder(file_id, folder_clean, subfolder_clean)
 
-    job = create_job_from_upload(
-        db,
-        file,
-        owner_id=user.id,
-        storage_folder=storage_folder,
-        mode='single',
-        email=email_clean,
-        department=None,
-        profile_id=profile_id,
-        folder=folder_clean or None,
-        subfolder=subfolder_clean or None,
-        tags=_parse_tags(tags),
-        password_hash=password_hash,
-    )
+    try:
+        job = create_job_from_upload(
+            db,
+            file,
+            user=user,
+            storage_folder=storage_folder,
+            mode='single',
+            email=email_clean,
+            department=None,
+            profile_id=profile_id,
+            folder=folder_clean or None,
+            subfolder=subfolder_clean or None,
+            tags=_parse_tags(tags),
+            password_hash=password_hash,
+        )
+    except DuplicateUploadError as exc:
+        return _duplicate_upload_response(exc.predecessor)
     db.commit()
 
     process_job.delay(file_id, profile_id, 'single', email_clean, None)
@@ -810,6 +877,80 @@ def get_job(job_id: str, db: Session = Depends(get_db), user: User = Depends(get
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail='Job not found')
     _require_visible(db, job, user)
     return _job_to_response(job)
+
+
+def _document_chain(db: Session, job: Job) -> list[Job]:
+    """The full set of Job rows for the same logical document as `job`:
+    walk previous_job_id back to the root version, then collect every
+    successor reachable from there (jobs whose previous_job_id points into
+    the chain), one generation at a time. Visibility is NOT applied here --
+    callers filter the result (see GET /jobs/{job_id}/versions)."""
+    root = job
+    seen_ids = {job.id}
+    while root.previous_job_id and root.previous_job_id not in seen_ids:
+        parent = db.get(Job, root.previous_job_id, options=list(_JOB_BLOB_DEFER_OPTIONS))
+        if parent is None:
+            break
+        seen_ids.add(parent.id)
+        root = parent
+
+    chain: dict[str, Job] = {root.id: root}
+    frontier = [root]
+    while frontier:
+        next_frontier: list[Job] = []
+        for node in frontier:
+            successors = db.scalars(
+                select(Job).where(Job.previous_job_id == node.id).options(*_JOB_BLOB_DEFER_OPTIONS)
+            ).all()
+            for successor in successors:
+                if successor.id not in chain:
+                    chain[successor.id] = successor
+                    next_frontier.append(successor)
+        frontier = next_frontier
+
+    return list(chain.values())
+
+
+@router.get('/jobs/{job_id}/versions', response_model=JobVersionsResponse)
+def get_job_versions(
+    job_id: str, request: Request, db: Session = Depends(get_db), user: User = Depends(get_current_user)
+) -> JobVersionsResponse:
+    enforce_rate_limit(request)
+
+    job = db.get(Job, job_id, options=list(_JOB_BLOB_DEFER_OPTIONS))
+    if job is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail='Job not found')
+    _require_visible(db, job, user)
+
+    chain = _document_chain(db, job)
+    visible_chain = [member for member in chain if _owner_visible(db, member.owner_id, user)]
+    # is_current is relative to the VISIBLE slice, not the full chain: a
+    # caller who can't see the newest version must not learn (by seeing
+    # every visible entry flagged not-current) that a newer, invisible
+    # version exists at all.
+    max_version = max((member.document_version for member in visible_chain), default=job.document_version)
+
+    owner_ids = {member.owner_id for member in visible_chain if member.owner_id}
+    usernames: dict[str, str] = {}
+    if owner_ids:
+        for owner_id, username in db.execute(select(User.id, User.username).where(User.id.in_(owner_ids))).all():
+            usernames[owner_id] = username
+
+    ordered = sorted(visible_chain, key=lambda member: member.document_version, reverse=True)
+    return JobVersionsResponse(
+        items=[
+            JobVersionEntry(
+                job_id=member.id,
+                document_version=member.document_version,
+                content_sha256=member.content_sha256,
+                status=member.status,
+                created_at=member.created_at,
+                uploaded_by=usernames.get(member.owner_id) if member.owner_id else None,
+                is_current=member.document_version == max_version,
+            )
+            for member in ordered
+        ]
+    )
 
 
 @router.get('/jobs', response_model=JobListResponse)
@@ -1171,6 +1312,18 @@ def download_markdown(
     return FileResponse(result_path, media_type='text/markdown', filename=filename)
 
 
+def _resolve_markdown_content(job: Job) -> str | None:
+    """DB-first with disk fallback for legacy rows written before
+    result_markdown existed -- shared by /preview and /export.json. Returns
+    None (never raises) if no markdown can be found anywhere."""
+    if job.result_markdown:
+        return job.result_markdown
+    path = _resolve_markdown_path(job)
+    if not path.exists():
+        return None
+    return path.read_text(encoding='utf-8')
+
+
 @router.get('/jobs/{job_id}/preview')
 def preview_markdown(
     job_id: str,
@@ -1188,12 +1341,87 @@ def preview_markdown(
 
     _check_job_password(job, password)
 
-    if job.result_markdown:
-        return PlainTextResponse(job.result_markdown)
-    path = _resolve_markdown_path(job)
-    if not path.exists():
+    content = _resolve_markdown_content(job)
+    if content is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail='Preview not available')
-    return PlainTextResponse(path.read_text(encoding='utf-8'))
+    return PlainTextResponse(content)
+
+
+@router.get('/jobs/{job_id}/export.json')
+def export_job_json(
+    job_id: str,
+    request: Request,
+    password: str | None = None,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+) -> Response:
+    enforce_rate_limit(request)
+
+    job = db.get(Job, job_id)
+    if job is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail='Job not found')
+    _require_visible(db, job, user)
+    if job.status != JobStatus.FINISHED:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail='Job not finished')
+
+    _check_job_password(job, password)
+
+    content = _resolve_markdown_content(job)
+    if content is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail='Result file not found')
+
+    info = job.processing_info if isinstance(job.processing_info, dict) else {}
+    settings_info = info.get('settings') if isinstance(info.get('settings'), dict) else {}
+    execution = info.get('execution') if isinstance(info.get('execution'), dict) else {}
+
+    owner_username: str | None = None
+    owner_team: str | None = None
+    if job.owner_id:
+        owner = db.get(User, job.owner_id)
+        if owner is not None:
+            owner_username = owner.username
+            if owner.team_id:
+                team = db.get(Team, owner.team_id)
+                owner_team = team.name if team is not None else None
+
+    stem = Path(job.original_filename).stem.strip() or job.id
+    filename = f'{stem}-{job.id}.json'
+
+    payload = {
+        'schema': 'paddledoc.job-export/1',
+        'job': {
+            'id': job.id,
+            'status': job.status.value,
+            'created_at': job.created_at.isoformat(),
+            'updated_at': job.updated_at.isoformat(),
+        },
+        'document': {
+            'source_filename': job.original_filename,
+            'content_sha256': job.content_sha256,
+            'document_version': job.document_version,
+            'previous_job_id': job.previous_job_id,
+            'tags': [tag.name for tag in job.tags],
+            'folder': settings_info.get('folder'),
+        },
+        'uploader': {
+            'username': owner_username,
+            'team': owner_team,
+        },
+        'processing': {
+            'profile_id': execution.get('profile_id'),
+            'profile_label': execution.get('profile_label'),
+            'engine': execution.get('engine'),
+            'used_fallback': execution.get('used_fallback'),
+            'page_count': execution.get('page_count'),
+            'quality_gate': execution.get('quality_gate'),
+        },
+        'markdown': content,
+    }
+
+    return JSONResponse(
+        content=payload,
+        headers={'Content-Disposition': _content_disposition('attachment', filename)},
+    )
 
 
 @router.get('/jobs/{job_id}/artifacts', response_model=JobArtifactListResponse)

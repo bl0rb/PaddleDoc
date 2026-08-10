@@ -153,3 +153,44 @@ export interface WorkerLogsResponse {
   /** Total rows matching the filters, ignoring limit/offset. */
   total: number;
 }
+
+/** One row of GET /api/v1/jobs/{id}/versions, newest-version-first. */
+export interface JobVersionEntry {
+  job_id: string;
+  document_version: number;
+  content_sha256: string | null;
+  status: 'PENDING' | 'RUNNING' | 'FINISHED' | 'FAILED';
+  created_at: string;
+  uploaded_by: string | null;
+  is_current: boolean;
+}
+
+/** GET /api/v1/jobs/{id}/versions */
+export interface JobVersionsResponse {
+  items: JobVersionEntry[];
+}
+
+/** Row of GET /api/v1/auth/tokens — the full token value is never re-shown after creation. */
+export interface ApiTokenSummary {
+  id: string;
+  name: string;
+  token_prefix: string;
+  created_at: string;
+  last_used_at: string | null;
+  expires_at: string | null;
+}
+
+/** GET /api/v1/auth/tokens */
+export interface ApiTokenListResponse {
+  items: ApiTokenSummary[];
+}
+
+/** POST /api/v1/auth/tokens — the only response that carries the full token. */
+export interface ApiTokenCreateResponse {
+  id: string;
+  name: string;
+  token: string;
+  token_prefix: string;
+  created_at: string;
+  expires_at: string | null;
+}

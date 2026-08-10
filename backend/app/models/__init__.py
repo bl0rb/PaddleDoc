@@ -1,4 +1,5 @@
 from app.models.models import (
+    ApiToken,
     AuthProvider,
     Base,
     Chunk,
@@ -21,6 +22,7 @@ from app.models.models import (
 )
 
 __all__ = [
+    'ApiToken',
     'AuthProvider',
     'Base',
     'Chunk',

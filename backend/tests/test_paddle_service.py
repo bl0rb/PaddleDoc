@@ -236,18 +236,71 @@ def test_convert_structure_to_markdown_renders_rag_blocks():
         ],
         source_name='test.pdf',
         profile_label='PP-OCRv6 tiny det + rec',
-        metadata={'mode': 'collection', 'email': 'team@example.com', 'department': 'Sales'},
+        metadata={
+            'mode': 'collection',
+            'email': 'team@example.com',
+            'department': 'Sales',
+            'profile_id': 'ppocrv6_tiny',
+            'engine': 'paddleocr',
+            'job_id': 'job-123',
+            'document_version': 2,
+            'content_sha256': 'abc123',
+            'previous_job_id': 'job-122',
+            'uploaded_by': 'alice',
+            'team': 'Research',
+            'tags': ['finance', 'invoices'],
+        },
     )
 
+    assert markdown.startswith('---\n')
     assert '## Heading' in markdown
-    assert 'mode: "collection"' in markdown
-    assert 'email: "team@example.com"' in markdown
-    assert 'department: "Sales"' in markdown
+    # yaml.safe_dump renders plain scalars unquoted (no more manual
+    # f-string double-quoting).
+    assert 'source: test.pdf' in markdown
+    assert 'profile_id: ppocrv6_tiny' in markdown
+    assert 'mode: collection' in markdown
+    assert 'email: team@example.com' in markdown
+    assert 'department: Sales' in markdown
+    assert 'job_id: job-123' in markdown
+    assert 'document_version: 2' in markdown
+    assert 'content_sha256: abc123' in markdown
+    assert 'previous_job_id: job-122' in markdown
+    assert 'uploaded_by: alice' in markdown
+    assert 'team: Research' in markdown
+    assert 'tags:' in markdown and '- finance' in markdown and '- invoices' in markdown
+    assert 'engine: paddleocr' in markdown
+    assert 'used_fallback' not in markdown  # only included when true
     # Table rendered as markdown, not raw HTML
     assert '| A | B |' in markdown
     assert '| 1 | 2 |' in markdown
     assert '---' in markdown  # separator present
     assert stats['block_count'] == 2
+
+
+def test_build_rag_frontmatter_omits_empty_optional_keys():
+    frontmatter = paddle_service._build_rag_frontmatter(
+        'plain.pdf', 3, 'PP-OCRv6 tiny det + rec', metadata={'engine': 'paddleocr', 'profile_id': 'ppocrv6_tiny'}
+    )
+
+    assert frontmatter.startswith('---\n')
+    assert frontmatter.rstrip('\n').endswith('---')
+    assert 'email:' not in frontmatter
+    assert 'department:' not in frontmatter
+    assert 'previous_job_id:' not in frontmatter
+    assert 'uploaded_by:' not in frontmatter
+    assert 'team:' not in frontmatter
+    assert 'tags:' not in frontmatter
+    assert 'used_fallback' not in frontmatter
+    assert 'job_id: null' in frontmatter
+    assert 'content_sha256: null' in frontmatter
+    assert 'document_version: 1' in frontmatter
+
+
+def test_build_rag_frontmatter_includes_used_fallback_only_when_true():
+    frontmatter = paddle_service._build_rag_frontmatter(
+        'plain.pdf', 1, 'pypdf fallback', metadata={'engine': 'pypdf-fallback', 'used_fallback': True}
+    )
+    assert 'used_fallback: true' in frontmatter
 
 
 def test_evaluate_document_quality_prefers_clean_high_confidence_documents():

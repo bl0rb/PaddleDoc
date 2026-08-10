@@ -118,7 +118,11 @@ def test_upload_allows_missing_email(monkeypatch, tmp_path):
 
     response = client.post(
         '/api/v1/upload',
-        files={'file': ('document.pdf', b'%PDF-sample', 'application/pdf')},
+        # Distinct filename from test_upload_creates_job: same admin-bypass
+        # owner, so an identical (filename, content) pair here would be
+        # flagged as a duplicate re-upload (see FEATURE 1 versioning) and
+        # 409 instead of exercising this test's actual intent.
+        files={'file': ('document-no-email.pdf', b'%PDF-sample', 'application/pdf')},
         data={'profile_id': 'ppocrv6_tiny', 'tags': 'draft'},
     )
     assert response.status_code == 200

@@ -133,15 +133,44 @@ export function buildFolderOptions(previous: FolderOptions, jobs: Job[]): Folder
   return next;
 }
 
+/** Body shape of the 409 duplicate-upload response (see UploadError). */
+export type DuplicateUploadBody = {
+  detail: string;
+  duplicate_of: string;
+  existing_version: number;
+};
+
 /**
- * POSTs a FormData payload via XHR so upload progress events can be reported.
+ * Thrown by {@link sendFormDataWithProgress} for a non-2xx response. `body`
+ * is the parsed JSON error body (or null if unparsable) — callers that need
+ * to react to a specific status (e.g. 409 duplicate upload) can narrow it
+ * themselves, e.g. `error.body as Partial<DuplicateUploadBody>`.
+ */
+export class UploadError extends Error {
+  status: number;
+  body: unknown;
+
+  constructor(status: number, message: string, body: unknown) {
+    super(message);
+    this.name = 'UploadError';
+    this.status = status;
+    this.body = body;
+  }
+}
+
+/**
+ * POSTs a FormData payload via XHR so upload progress events can be
+ * reported. Resolves with the parsed JSON response body (or null if the
+ * body is empty/unparsable) on a 2xx response. Rejects with
+ * {@link UploadError} on a non-2xx response, carrying the status and parsed
+ * body so callers can read fields like `duplicate_of`/`existing_version`.
  */
 export function sendFormDataWithProgress(
   url: string,
   formData: FormData,
   onProgress?: (loaded: number, total: number) => void,
-) {
-  return new Promise<void>((resolve, reject) => {
+): Promise<unknown> {
+  return new Promise((resolve, reject) => {
     const xhr = new XMLHttpRequest();
     xhr.open('POST', url);
     xhr.withCredentials = true;
@@ -151,14 +180,24 @@ export function sendFormDataWithProgress(
       }
     };
     xhr.onload = () => {
+      let body: unknown = null;
+      try {
+        body = xhr.responseText ? JSON.parse(xhr.responseText) : null;
+      } catch {
+        body = null;
+      }
       if (xhr.status >= 200 && xhr.status < 300) {
-        resolve();
+        resolve(body);
         return;
       }
       if (xhr.status === 401 && typeof window !== 'undefined') {
         window.location.assign('/login');
       }
-      reject(new Error(`Upload failed with status ${xhr.status}`));
+      const detail =
+        body && typeof body === 'object' && typeof (body as Record<string, unknown>).detail === 'string'
+          ? ((body as Record<string, unknown>).detail as string)
+          : `Upload failed with status ${xhr.status}`;
+      reject(new UploadError(xhr.status, detail, body));
     };
     xhr.onerror = () => reject(new Error('Network error while uploading'));
     xhr.send(formData);

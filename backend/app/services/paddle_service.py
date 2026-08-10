@@ -1,4 +1,5 @@
 import base64
+from datetime import datetime, timezone
 import html
 import importlib.util
 import json as _json
@@ -13,6 +14,7 @@ from typing import cast
 from celery.exceptions import TimeoutError as CeleryTimeoutError
 from pypdf import PdfReader, PdfWriter
 from redis import Redis
+import yaml
 
 from app.core.config import settings
 from app.services.quality_gate import evaluate_document_quality
@@ -300,33 +302,69 @@ def _build_rag_frontmatter(
     source_name: str,
     page_count: int,
     profile_label: str,
-    metadata: dict[str, str] | None = None,
+    metadata: dict[str, object] | None = None,
 ) -> str:
-    safe_name = source_name.replace('"', "'")
-    metadata = metadata or {}
-    mode = (metadata.get('mode') or 'single').replace('"', "'")
-    email = (metadata.get('email') or '').replace('"', "'")
-    department = (metadata.get('department') or '').replace('"', "'")
+    """Render the YAML frontmatter block prepended to every generated
+    markdown document (both the PP-StructureV3 path and the pypdf/spreadsheet
+    fallback paths -- see `_fallback_convert_with_frontmatter`).
 
-    lines = [
-        '---',
-        f'source: "{safe_name}"',
-        f'pages: {page_count}',
-        f'profile: "{profile_label}"',
-        f'mode: "{mode}"',
-        f'email: "{email}"',
-    ]
+    `metadata` carries everything the caller already knows about this
+    conversion: the worker (app/workers/tasks.py) enriches it from the Job
+    row (job_id, document_version, content_sha256, previous_job_id,
+    uploaded_by, team, tags) before calling convert_to_markdown_with_details;
+    profile_id/engine/used_fallback are set by this module's own call sites,
+    which are the only ones that actually know which pipeline/fallback ran.
+
+    yaml.safe_dump (never f-string interpolation) so attacker-controlled
+    values (filenames, emails, tags, ...) can't break out of the YAML block
+    or inject sibling keys -- same discipline as
+    app/services/confluence_markdown.render_frontmatter.
+    """
+    metadata = metadata or {}
+
+    mode = str(metadata.get('mode') or 'single')
+    email = str(metadata.get('email') or '')
+    department = str(metadata.get('department') or '')
+    document_version = metadata.get('document_version')
+    tags = metadata.get('tags')
+    used_fallback = bool(metadata.get('used_fallback'))
+
+    data: dict[str, object] = {
+        'source': source_name,
+        'pages': page_count,
+        'profile': profile_label,
+        'profile_id': metadata.get('profile_id'),
+        'mode': mode,
+    }
+    if email:
+        data['email'] = email
     if department:
-        lines.append(f'department: "{department}"')
-    lines.append('---')
-    return '\n'.join(lines)
+        data['department'] = department
+    data['job_id'] = metadata.get('job_id')
+    data['document_version'] = document_version if isinstance(document_version, int) else 1
+    data['content_sha256'] = metadata.get('content_sha256')
+    if metadata.get('previous_job_id'):
+        data['previous_job_id'] = metadata['previous_job_id']
+    if metadata.get('uploaded_by'):
+        data['uploaded_by'] = metadata['uploaded_by']
+    if metadata.get('team'):
+        data['team'] = metadata['team']
+    if isinstance(tags, list) and tags:
+        data['tags'] = tags
+    data['processed_at'] = datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
+    data['engine'] = metadata.get('engine')
+    if used_fallback:
+        data['used_fallback'] = True
+
+    dumped = yaml.safe_dump(data, default_flow_style=False, allow_unicode=True, sort_keys=False)
+    return f'---\n{dumped}---\n'
 
 
 def _convert_structure_to_markdown(
     page_structures: list[dict],
     source_name: str = '',
     profile_label: str = '',
-    metadata: dict[str, str] | None = None,
+    metadata: dict[str, object] | None = None,
 ) -> tuple[str, dict]:
     sections: list[str] = []
     block_count = 0
@@ -772,10 +810,62 @@ def _resolve_profile(profile_id: str | None) -> tuple[str, dict[str, str]]:
     return requested_profile, _PADDLE_PROFILES[requested_profile]
 
 
+def _fallback_convert_with_frontmatter(
+    source: Path,
+    suffix: str,
+    selected_profile_id: str,
+    selected_profile: dict[str, str],
+    metadata: dict[str, object] | None,
+    fallback_reason: str,
+    capability: dict,
+) -> tuple[str, dict]:
+    """Shared pypdf/spreadsheet fallback body for both call sites in
+    `convert_to_markdown_with_details` (PaddleOCR unavailable, and the
+    primary PP-StructureV3 path raising). Prepends the same RAG frontmatter
+    the successful path emits -- with used_fallback: true and the applicable
+    fallback engine -- so fallback output is never missing the header that
+    `PUT /jobs/{id}/save` and downstream RAG ingestion both expect.
+    `suffix` must be '.pdf', '.xls', or '.xlsx'.
+    """
+    engine = 'pypdf-fallback' if suffix == '.pdf' else 'spreadsheet-fallback'
+    frontmatter_metadata = {
+        **(metadata or {}),
+        'profile_id': selected_profile_id,
+        'engine': engine,
+        'used_fallback': True,
+    }
+
+    extra: dict[str, object] = {}
+    if suffix == '.pdf':
+        body = _fallback_pdf_to_markdown(source)
+        page_count = _pdf_page_count(source)
+    else:
+        body, sheet_count, row_count = _fallback_spreadsheet_to_markdown(source)
+        page_count = max(1, sheet_count)
+        extra = {'sheet_count': sheet_count, 'row_count': row_count}
+
+    frontmatter = _build_rag_frontmatter(
+        source.name, page_count, selected_profile['label'], metadata=frontmatter_metadata
+    )
+    markdown = ('\n\n---\n\n'.join([frontmatter, body])).strip()
+    quality_gate = evaluate_document_quality(markdown)
+    return markdown, {
+        'engine': engine,
+        'used_fallback': True,
+        'fallback_reason': fallback_reason,
+        'profile_id': selected_profile_id,
+        'profile_label': selected_profile['label'],
+        'page_count': page_count,
+        **extra,
+        'quality_gate': quality_gate,
+        **capability,
+    }
+
+
 def convert_to_markdown_with_details(
     input_path: str,
     profile_id: str | None = None,
-    metadata: dict[str, str] | None = None,
+    metadata: dict[str, object] | None = None,
 ) -> tuple[str, dict]:
     source = Path(input_path).resolve()
     if not source.exists():
@@ -785,35 +875,12 @@ def convert_to_markdown_with_details(
     capability = _runtime_capability()
 
     if not _paddleocr_available():
-        if source.suffix.lower() == '.pdf':
-            markdown = _fallback_pdf_to_markdown(source)
-            page_count = _pdf_page_count(source)
-            quality_gate = evaluate_document_quality(markdown)
-            return markdown, {
-                'engine': 'pypdf-fallback',
-                'used_fallback': True,
-                'fallback_reason': 'PaddleOCR is not installed in this worker image',
-                'profile_id': selected_profile_id,
-                'profile_label': selected_profile['label'],
-                'page_count': page_count,
-                'quality_gate': quality_gate,
-                **capability,
-            }
-        if source.suffix.lower() in {'.xls', '.xlsx'}:
-            markdown, sheet_count, row_count = _fallback_spreadsheet_to_markdown(source)
-            quality_gate = evaluate_document_quality(markdown)
-            return markdown, {
-                'engine': 'spreadsheet-fallback',
-                'used_fallback': True,
-                'fallback_reason': 'PaddleOCR is not installed in this worker image',
-                'profile_id': selected_profile_id,
-                'profile_label': selected_profile['label'],
-                'page_count': max(1, sheet_count),
-                'sheet_count': sheet_count,
-                'row_count': row_count,
-                'quality_gate': quality_gate,
-                **capability,
-            }
+        suffix = source.suffix.lower()
+        if suffix in {'.pdf', '.xls', '.xlsx'}:
+            return _fallback_convert_with_frontmatter(
+                source, suffix, selected_profile_id, selected_profile, metadata,
+                'PaddleOCR is not installed in this worker image', capability,
+            )
         raise RuntimeError('PaddleOCR is not installed in this worker image')
 
     try:
@@ -832,11 +899,17 @@ def convert_to_markdown_with_details(
                 selected_profile,
                 capability,
             )
+        frontmatter_metadata = {
+            **(metadata or {}),
+            'profile_id': selected_profile_id,
+            'engine': 'paddleocr',
+            'used_fallback': False,
+        }
         markdown, block_stats = _convert_structure_to_markdown(
             page_structures,
             source_name=source.name,
             profile_label=selected_profile['label'],
-            metadata=metadata,
+            metadata=frontmatter_metadata,
         )
         quality_gate = evaluate_document_quality(
             markdown,
@@ -862,35 +935,11 @@ def convert_to_markdown_with_details(
             **capability,
         }
     except Exception as exc:
-        if source.suffix.lower() == '.pdf':
-            markdown = _fallback_pdf_to_markdown(source)
-            page_count = _pdf_page_count(source)
-            quality_gate = evaluate_document_quality(markdown)
-            return markdown, {
-                'engine': 'pypdf-fallback',
-                'used_fallback': True,
-                'fallback_reason': str(exc),
-                'profile_id': selected_profile_id,
-                'profile_label': selected_profile['label'],
-                'page_count': page_count,
-                'quality_gate': quality_gate,
-                **capability,
-            }
-        if source.suffix.lower() in {'.xls', '.xlsx'}:
-            markdown, sheet_count, row_count = _fallback_spreadsheet_to_markdown(source)
-            quality_gate = evaluate_document_quality(markdown)
-            return markdown, {
-                'engine': 'spreadsheet-fallback',
-                'used_fallback': True,
-                'fallback_reason': str(exc),
-                'profile_id': selected_profile_id,
-                'profile_label': selected_profile['label'],
-                'page_count': max(1, sheet_count),
-                'sheet_count': sheet_count,
-                'row_count': row_count,
-                'quality_gate': quality_gate,
-                **capability,
-            }
+        suffix = source.suffix.lower()
+        if suffix in {'.pdf', '.xls', '.xlsx'}:
+            return _fallback_convert_with_frontmatter(
+                source, suffix, selected_profile_id, selected_profile, metadata, str(exc), capability,
+            )
         raise
 
 

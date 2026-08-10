@@ -67,6 +67,22 @@ class Job(Base):
     import_run_id: Mapped[str | None] = mapped_column(
         String(36), ForeignKey('import_runs.id', ondelete='SET NULL'), nullable=True, index=True
     )
+    # sha256 hex of the raw upload bytes, computed once at upload time.
+    # Drives duplicate-content detection and document versioning (see
+    # create_job_from_upload in app/api/routes.py) -- NULL for jobs created
+    # outside the two upload endpoints (e.g. Confluence-imported pages).
+    content_sha256: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    # 1 for a document's first upload; incremented on every subsequent
+    # re-upload of a same-named file that isn't byte-identical to the
+    # latest visible version. server_default keeps old raw-SQL/test inserts
+    # that don't set it explicitly NOT NULL-safe.
+    document_version: Mapped[int] = mapped_column(Integer, default=1, server_default='1', nullable=False)
+    # Chain pointer to the prior version's Job row (NULL for version 1 or
+    # for jobs with no detected predecessor). SET NULL so deleting an old
+    # version doesn't cascade-delete its successors.
+    previous_job_id: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey('jobs.id', ondelete='SET NULL'), nullable=True, index=True
+    )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc)
@@ -224,6 +240,7 @@ class User(Base):
     owned_collections: Mapped[list['Collection']] = relationship(back_populates='owner')
     import_sources: Mapped[list['ImportSource']] = relationship(back_populates='owner', cascade='all, delete-orphan')
     import_runs: Mapped[list['ImportRun']] = relationship(back_populates='owner')
+    api_tokens: Mapped[list['ApiToken']] = relationship(back_populates='user', cascade='all, delete-orphan')
 
 
 # Case-insensitive uniqueness on email. Declared after the class body (not in
@@ -250,6 +267,36 @@ class Session(Base):
     user_agent: Mapped[str | None] = mapped_column(String(512), nullable=True)
 
     user: Mapped[User] = relationship(back_populates='sessions')
+
+
+class ApiToken(Base):
+    """Personal bearer token for programmatic (non-cookie) API access.
+
+    Same never-store-the-raw-value discipline as Session: only
+    sha256(token) is persisted in token_hash (see
+    app/services/security.hash_session_token, reused here). token_prefix
+    (first 8 chars of the raw 'pd_...' token, itself not secret) lets the
+    owner recognize a token in the list UI without ever re-displaying the
+    full value, which is only ever returned once, at creation time, by
+    POST /api/v1/auth/tokens.
+    """
+
+    __tablename__ = 'api_tokens'
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    user_id: Mapped[str] = mapped_column(String(36), ForeignKey('users.id', ondelete='CASCADE'), nullable=False, index=True)
+    name: Mapped[str] = mapped_column(String(100), nullable=False)
+    token_hash: Mapped[str] = mapped_column(String(64), nullable=False, unique=True, index=True)
+    token_prefix: Mapped[str] = mapped_column(String(12), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), server_default=func.now(), nullable=False
+    )
+    # Touched at most once/60s by deps.get_current_user's bearer path, to
+    # bound write volume for tokens used on every request of a hot script.
+    last_used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    user: Mapped[User] = relationship(back_populates='api_tokens')
 
 
 class Collection(Base):

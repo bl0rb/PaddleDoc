@@ -17,6 +17,7 @@ type Job = {
   status: JobStatus;
   tags: string[];
   error_message?: string | null;
+  document_version?: number;
   processing_info?: {
     settings?: Record<string, unknown>;
     execution?: Record<string, unknown>;
@@ -748,9 +749,16 @@ export function DocumentBrowser({
               {paginatedItems.map((job) => (
                 <tr key={job.id} className="border-t border-slate-100">
                   <td className="py-3">
-                    <Link href={`/jobs/${job.id}`} className="line-clamp-2 font-medium text-slate-950 hover:text-emerald-700">
-                      {job.original_filename}
-                    </Link>
+                    <div className="flex items-center gap-2">
+                      <Link href={`/jobs/${job.id}`} className="line-clamp-2 font-medium text-slate-950 hover:text-emerald-700">
+                        {job.original_filename}
+                      </Link>
+                      {typeof job.document_version === 'number' && job.document_version > 1 && (
+                        <span className="shrink-0 rounded bg-slate-100 px-1.5 py-0.5 text-[10px] font-semibold text-slate-600">
+                          v{job.document_version}
+                        </span>
+                      )}
+                    </div>
                     {job.status === 'FAILED' && (
                       <p className="mt-1 text-xs text-amber-700">
                         {typeof job.processing_info?.execution?.warning === 'string'

@@ -15,6 +15,7 @@ doc:
 """
 
 import json
+import secrets
 from datetime import datetime, timedelta, timezone
 from urllib.parse import urlencode
 
@@ -35,11 +36,15 @@ from app.api.deps import (
 )
 from app.core.config import settings
 from app.database.session import get_db
-from app.models.models import AuthProvider, Job, Session as SessionModel, Team, User, UserRole, WorkerLogEntry
+from app.models.models import ApiToken, AuthProvider, Job, Session as SessionModel, Team, User, UserRole, WorkerLogEntry
 from app.schemas.auth import (
     AdminUserCreateRequest,
     AdminUserListResponse,
     AdminUserUpdateRequest,
+    ApiTokenCreateRequest,
+    ApiTokenCreateResponse,
+    ApiTokenListResponse,
+    ApiTokenResponse,
     ClaimOwnerlessRequest,
     ClaimOwnerlessResponse,
     LoginRequest,
@@ -281,6 +286,116 @@ def logout(request: Request, response: Response, db: Session = Depends(get_db)) 
 @router_authenticated.get('/me', response_model=UserResponse)
 def me(user: User = Depends(get_current_user)) -> UserResponse:
     return _user_response(user)
+
+
+# --- authenticated: personal API bearer tokens ---------------------------------
+#
+# Programmatic (non-cookie) access: 'pd_' + 32 bytes of urlsafe randomness,
+# stored as sha256(token) (see app/models/models.ApiToken and
+# deps.get_current_user's bearer path). The raw value is only ever returned
+# here, at creation time -- GET /tokens exposes token_prefix only.
+
+_API_TOKEN_PREFIX = 'pd_'
+_API_TOKEN_PREFIX_LEN = 8
+_API_TOKEN_MAX_PER_USER = 50
+
+
+def _api_token_response(token: ApiToken) -> ApiTokenResponse:
+    return ApiTokenResponse(
+        id=token.id,
+        name=token.name,
+        token_prefix=token.token_prefix,
+        created_at=token.created_at,
+        last_used_at=token.last_used_at,
+        expires_at=token.expires_at,
+    )
+
+
+def _reject_bearer_token_management(request: Request) -> None:
+    """Token management (create/list/delete) requires a browser session: a
+    stolen bearer token must not be able to mint its own replacements or
+    delete the owner's other tokens. Detected off the raw header rather than
+    how `user` ended up resolved, since that's what actually distinguishes
+    the two credential kinds here."""
+    auth_header = request.headers.get('authorization') or ''
+    if auth_header.lower().startswith('bearer '):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail='API tokens cannot manage tokens; use a browser session',
+        )
+
+
+@router_authenticated.post('/tokens', response_model=ApiTokenCreateResponse, status_code=status.HTTP_201_CREATED)
+def create_api_token(
+    payload: ApiTokenCreateRequest,
+    request: Request,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+) -> ApiTokenCreateResponse:
+    enforce_rate_limit(request)
+    _reject_bearer_token_management(request)
+
+    existing_count = db.scalar(select(func.count()).select_from(ApiToken).where(ApiToken.user_id == user.id)) or 0
+    if existing_count >= _API_TOKEN_MAX_PER_USER:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f'Token limit reached ({_API_TOKEN_MAX_PER_USER} per user)',
+        )
+
+    raw_token = f'{_API_TOKEN_PREFIX}{secrets.token_urlsafe(32)}'
+    expires_at = (
+        datetime.now(timezone.utc) + timedelta(days=payload.expires_in_days)
+        if payload.expires_in_days is not None
+        else None
+    )
+    token = ApiToken(
+        user_id=user.id,
+        name=payload.name.strip(),
+        token_hash=hash_session_token(raw_token),
+        token_prefix=raw_token[:_API_TOKEN_PREFIX_LEN],
+        expires_at=expires_at,
+    )
+    db.add(token)
+    db.commit()
+    return ApiTokenCreateResponse(
+        id=token.id,
+        name=token.name,
+        token=raw_token,
+        token_prefix=token.token_prefix,
+        created_at=token.created_at,
+        expires_at=token.expires_at,
+    )
+
+
+@router_authenticated.get('/tokens', response_model=ApiTokenListResponse)
+def list_api_tokens(
+    request: Request, db: Session = Depends(get_db), user: User = Depends(get_current_user)
+) -> ApiTokenListResponse:
+    enforce_rate_limit(request)
+    _reject_bearer_token_management(request)
+
+    tokens = db.scalars(
+        select(ApiToken).where(ApiToken.user_id == user.id).order_by(ApiToken.created_at.desc())
+    ).all()
+    return ApiTokenListResponse(items=[_api_token_response(token) for token in tokens])
+
+
+@router_authenticated.delete('/tokens/{token_id}', status_code=status.HTTP_204_NO_CONTENT)
+def delete_api_token(
+    token_id: str, request: Request, db: Session = Depends(get_db), user: User = Depends(get_current_user)
+) -> Response:
+    enforce_rate_limit(request)
+    _reject_bearer_token_management(request)
+
+    # (token_id AND user_id) binding lives in the query itself: another
+    # user's token_id must 404, never be deletable by guessing/enumerating
+    # ids (IDOR), same discipline as the job-artifact content endpoint.
+    token = db.scalar(select(ApiToken).where(ApiToken.id == token_id, ApiToken.user_id == user.id))
+    if token is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail='Token not found')
+    db.delete(token)
+    db.commit()
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
 # --- public: OIDC providers + redirect dance -----------------------------------

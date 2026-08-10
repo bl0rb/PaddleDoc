@@ -9,7 +9,7 @@ from sqlalchemy import select, update
 
 from app.core.config import settings
 from app.database.session import SessionLocal
-from app.models.models import ImportRun, ImportRunStatus, Job, JobStatus
+from app.models.models import ImportRun, ImportRunStatus, Job, JobStatus, Team, User
 from app.services.paddle_service import (
     convert_to_markdown_with_details,
     get_paddle_settings,
@@ -316,6 +316,22 @@ def process_job(
             job.upload_path = str(upload_path)
             db.commit()
 
+        # Enrich the frontmatter metadata with everything the DB already
+        # knows about this job -- job identity/version/hash/lineage plus the
+        # uploader's identity -- so _build_rag_frontmatter can render it
+        # without paddle_service needing its own DB access. profile_id and
+        # engine are deliberately NOT set here: only paddle_service knows
+        # which pipeline/fallback actually ran for this conversion.
+        owner_username: str | None = None
+        team_name: str | None = None
+        if job.owner_id:
+            owner = db.get(User, job.owner_id)
+            if owner is not None:
+                owner_username = owner.username
+                if owner.team_id:
+                    owner_team = db.get(Team, owner.team_id)
+                    team_name = owner_team.name if owner_team is not None else None
+
         markdown, details = convert_to_markdown_with_details(
             str(upload_path),
             profile_id=effective_profile_id,
@@ -323,6 +339,13 @@ def process_job(
                 'mode': mode or 'single',
                 'email': email or '',
                 'department': department or '',
+                'job_id': job.id,
+                'document_version': job.document_version,
+                'content_sha256': job.content_sha256,
+                'previous_job_id': job.previous_job_id,
+                'uploaded_by': owner_username,
+                'team': team_name,
+                'tags': sorted(tag.name for tag in job.tags),
             },
         )
         details = _normalize_execution_page_count(details, upload_path)
