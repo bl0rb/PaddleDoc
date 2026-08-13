@@ -1,18 +1,23 @@
-﻿# PaddleDoc
+# PaddleDoc
 
 PaddleDoc is a document processing platform powered by PaddleOCR that converts PDFs, Office files, and images into structured Markdown for RAG pipelines.
 
 It is built for teams that need reliable ingestion quality, searchable outputs, and simple deployment options from standalone NAS Docker to Kubernetes.
 
+![Home page](docs/screenshots/home.png)
+
 ## Why PaddleDoc
 
-Managing OCR and document normalization at scale gets messy fast. PaddleDoc gives you one workflow for ingestion, extraction, quality scoring, and retrieval-ready output.
+Managing OCR and document normalization at scale gets messy fast. PaddleDoc gives you one workflow for ingestion, extraction, quality scoring, versioning, and retrieval-ready output.
 
-- RAG-first Markdown output with consistent structure
+- RAG-first Markdown output with rich YAML frontmatter (source, hash, version, uploader, team, engine)
+- **Document versioning built in** — re-uploading a changed file becomes version N+1 with full history; byte-identical re-uploads are detected and skipped
 - Multiple OCR and vision profiles (fast OCR, layout-aware, VL, OpenAI-compatible)
-- Folder and tag organization for search and retrieval workflows
-- Queue-based processing with backend + worker separation
-- Optional password protection and versioned markdown edits
+- **VL benchmark** — run one document against up to 6 vision-language models plus an OCR baseline and compare the results side by side
+- **Personal API tokens** — programmatic access via `Authorization: Bearer`, no cookie handling
+- Folder and tag organization, search, quality grades, JSON export per job
+- Queue-based processing with backend + worker separation; worker logs live in the admin console
+- User accounts with team visibility, local login and OIDC SSO (Keycloak, Microsoft Entra ID)
 
 ## Get Started
 
@@ -23,7 +28,7 @@ Choose your deployment mode:
 | Standalone Docker | Local server or NAS (UGREEN/QNAP/Synology) | `docker compose -f docker-compose.nas.yml up -d` |
 | Docker (Dev/Single Host) | Local development with local builds | `docker compose up --build` |
 | Docker + NVIDIA GPU | Windows Docker Desktop with GPU-enabled worker profile | `docker compose -f docker-compose.yml -f docker-compose.gpu.yml up -d --build` |
-| Kubernetes (Helm) | k3s/k8s clusters and scale-out deployments | `helm upgrade --install PaddleDoc ./charts/paddledoc -n PaddleDoc --create-namespace` |
+| Kubernetes (Helm) | k3s/k8s clusters and scale-out deployments | `helm upgrade --install paddledoc ./charts/paddledoc -n paddledoc --create-namespace --set auth.secretKey.value=$(openssl rand -hex 32)` |
 
 ### Standalone NAS (No Kubernetes)
 
@@ -43,7 +48,7 @@ PADDLEDOC_TAG=latest
 PADDLEDOC_PUBLIC_API_URL=http://NAS_IP:8000
 
 # Since v1.1.0 (authentication):
-SECRET_KEY=generate-with-openssl-rand-hex-32   # signs sessions, encrypts stored OIDC secrets — set once, never change
+SECRET_KEY=generate-with-openssl-rand-hex-32   # signs sessions, encrypts stored secrets — set once, never change
 REDIS_PASSWORD=change-this-too
 PUBLIC_API_URL=http://NAS_IP:8000              # backend URL used for OIDC redirect URIs
 CORS_ORIGINS=["http://NAS_IP:3000"]            # your frontend origin(s); no wildcard — cookies are credentialed
@@ -54,7 +59,7 @@ Endpoints:
 - Frontend: `http://NAS_IP:3000`
 - Backend: `http://NAS_IP:8000`
 
-First run: open `http://NAS_IP:3000/setup` and create the initial admin account. Everything else requires a login from then on.
+First run: open `http://NAS_IP:3000/setup` and create the initial admin account. Everything else requires a login from then on. Database migrations run automatically on backend startup.
 
 ### Docker (Local Build)
 
@@ -72,14 +77,15 @@ Endpoints:
 Quick install from local chart:
 
 ```bash
-helm upgrade --install PaddleDoc ./charts/paddledoc \
-  --namespace PaddleDoc --create-namespace
+helm upgrade --install paddledoc ./charts/paddledoc \
+  --namespace paddledoc --create-namespace \
+  --set auth.secretKey.value=$(openssl rand -hex 32)
 ```
 
 Install from GHCR OCI chart:
 
 ```bash
-helm install paddledoc oci://ghcr.io/bl0rb/charts/paddledoc --version 1.1.0 \
+helm install paddledoc oci://ghcr.io/bl0rb/charts/paddledoc --version 1.2.1 \
   --namespace paddledoc --create-namespace \
   --set auth.secretKey.value=$(openssl rand -hex 32)
 ```
@@ -88,28 +94,74 @@ Since chart 1.1.0 a `SECRET_KEY` is required — the chart refuses to render wit
 
 ## Core Features
 
-- Upload via drag and drop or file picker
-- Supported formats: PDF, DOCX, PPTX, XLSX, PNG, JPG, JPEG
-- Job lifecycle: `PENDING -> RUNNING -> FINISHED / FAILED`
-- Folder tree navigation and deletion by folder
-- Search and filtering by filename, tags, date range
-- Global statistics and runtime status (CPU/GPU)
-- Versioned markdown editing on job detail page
+- Upload via drag and drop or file picker (PDF, DOCX, PPTX, XLSX, XLS, PNG, JPG, JPEG)
+- **Content-hash document versioning**: same-named uploads within a team become version chains with full history; identical content is deduplicated
+- Job lifecycle `PENDING -> RUNNING -> FINISHED / FAILED` with adaptive live updates
+- Folder tree navigation, tags, search and filtering, date ranges
+- A/B/C document quality gate per job
+- Versioned markdown editing on the job detail page
+- **JSON export per job** — metadata, uploader, processing details, and markdown in one file
+- **VL benchmark** with per-variant metrics and side-by-side markdown comparison
+- **Personal API tokens** for programmatic access (created on the Settings page, shown once, stored hashed)
+- **Worker logs in the admin console** — level/worker/text filters, auto-refresh, tracebacks
 - Password-gated view/download/edit/delete per job
 - OpenAI-compatible page-by-page vision profile
-- User accounts with per-user/team data visibility, local login and OIDC SSO (Keycloak, Microsoft Entra ID)
-- Admin console for users, teams, and identity providers — SSO is configured at runtime, no redeploy
+- User accounts with per-user/team data visibility, local login and OIDC SSO
+- Admin console for users, teams, identity providers, worker logs, and VL connections
 
-## Authentication
+## Product Walkthrough
 
-Since v1.1.0 every page and API endpoint requires a login.
+### Home (`/`)
 
-- **First run**: `/setup` creates the initial admin account (only available while no user exists).
-- **Local login**: username/email + password at `/login`. Login is rate-limited and gives no hint whether an account exists.
-- **SSO (OIDC)**: admins add Keycloak or Microsoft Entra ID under `/admin` → Identity Providers (issuer URL, client ID/secret), test the connection, and enable the provider — it then appears as a login button. Client secrets are stored encrypted (derived from `SECRET_KEY`) and are write-only in the UI. New SSO logins get their own fresh account; linking an SSO identity to an existing account is an explicit admin action, never automatic.
-- **Visibility**: users see only their own jobs; members of a team see all of the team's jobs. Jobs created before v1.1.0 have no owner and are admin-only until an admin assigns them (`/admin` → Users → "Assign ownerless jobs").
-- **Sessions**: httpOnly cookie, server-side in the database — 7-day sliding expiry, 30-day cap.
-- **Operational requirements**: `SECRET_KEY` (mandatory, set once and never change it — rotating it invalidates all sessions and makes stored OIDC client secrets unreadable), `PUBLIC_API_URL` (external backend URL, used to build OIDC redirect URIs), `REDIS_PASSWORD`, and concrete `CORS_ORIGINS` (no wildcard).
+System health, selected runtime (CPU/GPU), queue state, and global statistics — with honest degradation: if the backend becomes unreachable, the dashboard marks data as "last known" instead of pretending it is current.
+
+### Processing (`/processing`)
+
+![Processing](docs/screenshots/processing.png)
+
+Guided flow: choose single-file or collection mode, add metadata (folder/subfolder, tags, department, optional password), select the OCR profile, upload. Re-entering the flow is instant — profiles and settings render from cache and revalidate in the background.
+
+### Tasks (`/jobs`)
+
+![Tasks](docs/screenshots/jobs.png)
+
+Browse all jobs with folder tree, filters, quality grades, and version badges — `v2` marks documents that were re-uploaded with changed content.
+
+### Job Detail (`/jobs/{id}`)
+
+![Job detail](docs/screenshots/job-detail.png)
+
+Review metadata, quality gate, and processing info; preview or edit markdown; download the result as Markdown or JSON. The **Versions** table shows the full history of the document — who uploaded which version when, with content hashes — and links to every prior version.
+
+### Benchmark (`/benchmark`)
+
+![Benchmark](docs/screenshots/benchmark.png)
+
+Run one document against up to 6 admin-configured VL connections plus optionally one OCR profile (2–7 variants per run).
+
+![Benchmark report](docs/screenshots/benchmark-report.png)
+
+The report compares duration, pages, output size, quality grade, and errors per variant — with a tabbed markdown preview, links to each variant's job, and a JSON export. Variants that silently degraded to plain-text fallback are never crowned fastest/best.
+
+### Settings (`/settings`)
+
+![Settings](docs/screenshots/settings.png)
+
+Create personal API tokens for programmatic access. Tokens are shown exactly once, stored as a hash, support optional expiry, and can be revoked anytime. Token management itself requires a browser session — a leaked token cannot mint replacements.
+
+### Admin Console (`/admin`)
+
+![Admin users](docs/screenshots/admin-users.png)
+
+Admins manage users (roles, teams, activation, password resets, assigning legacy ownerless jobs), teams, and OIDC identity providers — including a per-provider connection test.
+
+![VL connections](docs/screenshots/admin-vl-connections.png)
+
+**VL connections** hold OpenAI-compatible vision endpoints for the benchmark: base URL, model, API key (encrypted at rest, never displayed again), and a per-connection system prompt — with a test button that reports latency. Internal endpoints (vLLM, LiteLLM, Ollama) are first-class citizens.
+
+![Worker logs](docs/screenshots/admin-logs.png)
+
+**Worker logs** streams the processing containers' output into the admin console — level/worker/text filtering, auto-refresh, expandable tracebacks. Works identically under Docker Compose and Kubernetes (logs are persisted via the database, no docker.sock required).
 
 ## OCR Profiles
 
@@ -120,84 +172,42 @@ Since v1.1.0 every page and API endpoint requires a login.
 | PP-OCRv6 Medium | Higher OCR quality |
 | PP-StructureV3 variants | Stronger table/layout extraction |
 | PaddleOCR-VL 1.6 (0.9B) | Rich document understanding, best on GPU |
-| OpenAI-compatible Vision API | Route each page to OpenAI-compatible endpoint |
-
-## Product Walkthrough
-
-### Home (`/`)
-
-![Home page](docs/screenshots/home.png)
-
-Shows system health, selected runtime (CPU/GPU), and global job statistics.
-
-### Processing (`/processing`)
-
-![Processing step 1](docs/screenshots/processing-step1.png)
-
-1. Choose single-file or collection flow
-2. Add metadata (email, department, folder/subfolder, tags, optional password)
-3. Select OCR profile
-4. Upload and start processing
-
-![Processing step 2](docs/screenshots/processing-step2.png)
-![Processing step 3](docs/screenshots/processing-step3.png)
-
-### Jobs (`/jobs`)
-
-![Jobs page](docs/screenshots/jobs.png)
-
-Browse all jobs, filter by folder/tags/date/filename, and open detailed results.
-
-### Job Detail (`/jobs/{id}`)
-
-![Job detail](docs/screenshots/job-detail.png)
-
-Review metadata and processing info, preview or edit markdown, and download output.
-
-### Setup & Login (`/setup`, `/login`)
-
-First run bootstraps the initial admin at `/setup`; afterwards `/login` offers local sign-in plus one button per enabled OIDC provider.
-
-### Admin Console (`/admin`)
-
-Admins manage users (roles, teams, activation, password resets, assigning legacy ownerless jobs), teams, and OIDC identity providers — including a per-provider connection test.
+| OpenAI-compatible Vision API | Route each page to an OpenAI-compatible endpoint |
 
 ## API Quickstart
 
-All `/api/v1` endpoints (except `/health` and the auth endpoints themselves) require a session. Log in once and reuse the cookie:
+The fastest way to use the API programmatically is a **personal API token** (Settings → API tokens):
 
 ```bash
-# Log in and store the session cookie
-curl -c cookies.txt -H "Content-Type: application/json" \
-  -d '{"identifier": "admin", "password": "your-password"}' \
-  http://localhost:8000/api/v1/auth/login
+TOKEN=pd_your-token-here
 
-# Use it on every subsequent call
-curl -b cookies.txt http://localhost:8000/api/v1/jobs
+# Upload a document
+curl -H "Authorization: Bearer $TOKEN" \
+  -F "file=@invoice.pdf" -F "profile_id=ppocrv6_tiny" -F "folder=finance" \
+  http://localhost:8000/api/v1/upload
+
+# Poll the job, then fetch the result as markdown or JSON
+curl -H "Authorization: Bearer $TOKEN" http://localhost:8000/api/v1/jobs/<job_id>
+curl -H "Authorization: Bearer $TOKEN" http://localhost:8000/api/v1/jobs/<job_id>/preview
+curl -H "Authorization: Bearer $TOKEN" -o result.json \
+  http://localhost:8000/api/v1/jobs/<job_id>/export.json
 ```
+
+Browser-style session login works too (`POST /api/v1/auth/login` with a cookie jar); token management endpoints themselves always require a session.
 
 Common endpoints:
 
-- `POST /api/v1/auth/login` / `POST /api/v1/auth/logout` / `GET /api/v1/auth/me`
-- `POST /api/v1/upload`
-- `GET /api/v1/jobs`
-- `GET /api/v1/jobs/{job_id}`
-- `GET /api/v1/jobs/{job_id}/preview`
-- `GET /api/v1/jobs/{job_id}/download`
-- `PUT /api/v1/jobs/{job_id}/save`
-- `DELETE /api/v1/jobs/{job_id}`
-- `GET /api/v1/stats`
-- `GET /api/v1/health`
-- `GET /api/v1/paddle/status`
-- `GET /api/v1/paddle/settings`
-- `PUT /api/v1/paddle/settings`
-- `GET /api/v1/paddle/capabilities`
-
-Upload using the OpenAI-compatible vision profile:
-
-```bash
-curl -b cookies.txt -F "file=@invoice.pdf" -F "profile_id=openai_vision" http://localhost:8000/api/v1/upload
-```
+- `POST /api/v1/upload` — upload one document (409 with `duplicate_of` if content is identical to the latest version)
+- `GET /api/v1/jobs` / `GET /api/v1/jobs/{id}` — list/detail
+- `GET /api/v1/jobs/{id}/versions` — version history of the document
+- `GET /api/v1/jobs/{id}/preview` / `/download` — markdown result
+- `GET /api/v1/jobs/{id}/export.json` — structured JSON export (metadata + markdown)
+- `PUT /api/v1/jobs/{id}/save` — edit markdown (creates an edit version)
+- `POST /api/v1/benchmarks` — start a benchmark run; `GET /api/v1/benchmarks/{id}/report` for the comparison
+- `GET /api/v1/vl-connections` — enabled VL connections (id, name, model)
+- `POST /api/v1/auth/tokens` / `GET` / `DELETE /api/v1/auth/tokens/{id}` — API token management (session only)
+- `GET /api/v1/auth/admin/worker-logs` — worker logs (admin)
+- `GET /api/v1/stats`, `GET /api/v1/health`, `GET /api/v1/paddle/status`, `GET /api/v1/paddle/capabilities`
 
 ## n8n Integration
 
@@ -210,17 +220,17 @@ flowchart LR
    C --> D[PaddleDoc Queue\nCelery + Worker]
    D --> E[PaddleOCR Processing\nStructured Markdown Output]
    E --> F[n8n Poll Loop\nGET /api/v1/jobs/job-id]
-   F --> G[n8n Fetch Result\nGET preview or download]
+   F --> G[n8n Fetch Result\nGET preview / export.json]
    G --> H[RAG Ingestion\nChunk + Embed + Index]
    H --> I[Retrieval + Answering\nVector Search + LLM]
 ```
+
+Since v1.2.1, the simplest integration is a **personal API token**: create one under Settings for a dedicated PaddleDoc user and set a single `Authorization: Bearer pd_...` header on every HTTP Request node — no login node, no cookie forwarding. Use `/export.json` to get markdown plus metadata (hash, version, quality grade) in one call.
 
 n8n URL choice:
 
 - n8n inside Docker with PaddleDoc: `http://backend:8000`
 - n8n on host machine: `http://localhost:8000`
-
-Since v1.1.0 the API requires a session: create a dedicated PaddleDoc user for n8n, add one HTTP Request node that POSTs `{"identifier": ..., "password": ...}` to `/api/v1/auth/login` at the start of the workflow, and forward the returned `paddledoc_session` cookie to every subsequent node (enable "Include Response Headers and Status" on the login node, or use a shared cookie jar). Sessions last 7 days on a sliding window, so logging in once per workflow run is the simplest robust pattern.
 
 ## Deployment and Runtime Notes
 
@@ -231,22 +241,14 @@ inbound/outbound connection matrix per component.
 ### Architecture
 
 ```text
-frontend  (Next.js + TypeScript + Tailwind + framer-motion)
+frontend  (Next.js + TypeScript + Tailwind)
 backend   (FastAPI + SQLAlchemy + Alembic + Celery)
 postgres  (default in Docker compose)
 redis     (queue/broker)
-worker    (Celery worker)
+worker    (Celery worker; mirrors its logs into Postgres for the admin console)
 ```
 
-Storage layout:
-
-```text
-backend/storage/uploads/single/<job_id>
-backend/storage/uploads/collections/<collection_id>/<job_id>
-backend/storage/results/single/<job_id>
-backend/storage/results/collections/<collection_id>/<job_id>
-backend/storage/results/.../edited
-```
+Migrations run automatically on backend startup (Alembic, currently `0001` … `0008`).
 
 ### GPU Runtime (Windows + NVIDIA)
 
@@ -280,11 +282,15 @@ Memory-constrained baseline:
 - `OMP_NUM_THREADS=1`
 - `ONNXRUNTIME_INTRA_OP_NUM_THREADS=1`
 
-## OpenAI-Compatible Vision Profile
+Worker log capture (admin console): `WORKER_LOG_CAPTURE_LEVEL` (default `INFO`, independent of the console `--loglevel`) and `WORKER_LOG_RETENTION_MAX_ROWS` (default `20000`).
 
-PaddleDoc includes `openai_vision`, which sends each page image to an OpenAI-compatible Chat Completions endpoint and assembles markdown output.
+## OpenAI-Compatible Vision
 
-Environment variables:
+Two ways to use vision-language models:
+
+**1. VL connections (recommended, since v1.2.1)** — admins add any number of OpenAI-compatible endpoints under Admin → VL connections (base URL, model, encrypted API key, per-connection system prompt) and test them from the UI. Used by the benchmark; internal endpoints like vLLM/LiteLLM/Ollama work out of the box. The connection appends `/v1/chat/completions` to the base URL.
+
+**2. `openai_vision` profile (env-based)** — a single global endpoint for regular processing:
 
 ```dotenv
 OPENAI_API_BASE_URL=https://api.openai.com
@@ -298,14 +304,7 @@ OPENAI_API_BASE_URL=http://host.docker.internal:11434
 OPENAI_API_BEARER_TOKEN=ollama
 ```
 
-LiteLLM/proxy example:
-
-```dotenv
-OPENAI_API_BASE_URL=http://litellm:4000
-OPENAI_API_BEARER_TOKEN=sk-litellm-key
-```
-
-Apply changes without rebuilding images:
+Apply env changes without rebuilding images:
 
 ```bash
 docker compose up -d --no-deps backend worker
@@ -315,9 +314,9 @@ docker compose up -d --no-deps backend worker
 
 Published images:
 
-- `ghcr.io/bl0rb/PaddleDoc-backend`
-- `ghcr.io/bl0rb/PaddleDoc-worker`
-- `ghcr.io/bl0rb/PaddleDoc-frontend`
+- `ghcr.io/bl0rb/paddledoc-backend`
+- `ghcr.io/bl0rb/paddledoc-worker`
+- `ghcr.io/bl0rb/paddledoc-frontend`
 
 ### Image publishing (automated)
 
@@ -326,21 +325,11 @@ Workflow: `.github/workflows/publish-ghcr-images.yml`
 Trigger publish via git tag:
 
 ```bash
-git tag v0.2.0
-git push origin v0.2.0
+git tag v1.2.1
+git push origin v1.2.1
 ```
 
-This publishes multi-arch images (`linux/amd64`, `linux/arm64`) with tags:
-
-- `0.2.0`
-- `latest`
-
-### Image publishing (manual)
-
-```powershell
-echo $env:GHCR_PAT | docker login ghcr.io -u bl0rb --password-stdin
-./scripts/publish-ghcr-images.ps1 -Tag 0.2.0 -AlsoLatest
-```
+This publishes multi-arch images (`linux/amd64`, `linux/arm64`; worker is amd64) tagged with the version and `latest`. Pre-release tags (anything with a hyphen, e.g. `v1.2.1-rc.1`) publish their version tag but deliberately do **not** move `latest`, and their GitHub release is marked as a prerelease.
 
 ### Helm chart publishing (automated)
 
@@ -368,6 +357,10 @@ IPv4 health check:
 curl.exe -s -o NUL -w "%{http_code}\n" http://127.0.0.1:8000/api/v1/health
 ```
 
+### Worker warnings about model hosters (restricted egress)
+
+If worker egress to the model download hosts is blocked and models come from a pre-warmed cache, set `PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK=True` in the worker environment (Helm: via `worker.extraEnv`; Compose: add it to the worker service's `environment:` block) to skip the ~9s connectivity check per model instantiation. Egress rules per component: [docs/firewall-requirements.md](docs/firewall-requirements.md).
+
 ## Local Development
 
 Backend:
@@ -388,23 +381,18 @@ npm run build
 npm run dev
 ```
 
-Migrations:
-
-- `backend/alembic/versions/0001_init.py`
-- `backend/alembic/versions/0002_add_password_protection.py`
-- `backend/alembic/versions/0002_job_blob_tags.py`
-- `backend/alembic/versions/0002_job_processing_info.py`
-
 ## Roadmap
 
 ### RAG Quality Foundation
 
 - [ ] Define measurable quality and retrieval benchmarks
 - [x] Grade A/B/C document quality gate
+- [x] Multi-model VL benchmark with comparison reports
 - [ ] Add a regression-focused RAG evaluation harness
 
 ### Reliability and Operations
 
+- [x] Worker logs in the admin console (portable, DB-backed)
 - [ ] Add deeper observability (queue depth, latency, retries, failures)
 - [ ] Add stronger governance (audit logs, stricter validation, RBAC)
 
@@ -413,14 +401,14 @@ Migrations:
 - [x] Automate multi-arch GHCR image publishing on release tags
 - [x] Automate Helm OCI chart publishing to GHCR on release tags
 - [x] Add PR CI gates (lint, tests, and build checks) via `.github/workflows/pr-ci.yml`
+- [x] Pre-release (rc) tags that never move `latest`
 - [ ] Add image signing/provenance verification and immutable release policy
 - [ ] Expand security scanning and SBOM coverage
 
 ### Product and Ecosystem
 
+- [x] Personal API tokens for programmatic pipelines
+- [x] Document versioning with content hashes
+- [x] JSON export per job
 - [ ] Improve batch progress and operator feedback UX
 - [ ] Add vector DB export/webhook integrations
-
-### Milestone
-
-- [ ] Ship v0.2.0 with quality + reliability focus
