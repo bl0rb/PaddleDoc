@@ -14,19 +14,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   optionally one OCR profile (2-7 variants) on the new Benchmark page and get a comparison
   report — duration, pages, output size, quality grade, fallback/error per variant — with
   per-variant markdown preview and JSON export. Benchmark variants are processed as regular
-  jobs but stay out of the jobs list, stats, folders, and document versioning (#57)
+  jobs but stay out of the jobs list, stats, folders, and document versioning (#60)
 - Document versioning via content hash: every upload stores a SHA-256 of the file; uploading
   a same-named file visible to the same team creates version N+1 linked to its predecessor,
   byte-identical re-uploads are rejected with a pointer to the existing version instead of
   being processed twice. Job detail shows the version history (who uploaded which version
-  when), the job list marks re-versioned documents with a version badge (#57)
+  when), the job list marks re-versioned documents with a version badge (#60)
 - JSON result export: `GET /api/v1/jobs/{id}/export.json` (same per-job password gate as the
   markdown download) bundles document metadata (filename, hash, version, tags), uploader and
   team, processing details (profile, engine, pages, quality gate) and the full markdown;
-  "Download JSON" button on the job detail page (#57)
+  "Download JSON" button on the job detail page (#60)
 - Personal API tokens: users create bearer tokens (shown exactly once, stored hashed,
   optional expiry) on the new Settings page and use them via `Authorization: Bearer` for
-  programmatic access to the full API — no session cookie required (#57)
+  programmatic access to the full API — no session cookie required (#60)
 
 - Worker logs in the admin console: Celery workers mirror their log output into a new
   `worker_log_entries` Postgres table (portable — no docker.sock; identical under Compose
@@ -41,7 +41,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Result markdown frontmatter is now proper YAML (`yaml.safe_dump`) and carries
   `job_id`, `document_version`, `content_sha256`, `previous_job_id`, `uploaded_by`, `team`,
   `tags`, `processed_at` and `engine` in addition to the previous keys; plain-text fallback
-  results now get a frontmatter header too (previously none) (#57)
+  results now get a frontmatter header too (previously none) (#60)
 - The sidebar is now a permanently visible rail on desktop viewports (≥1024px); small
   screens keep the burger-toggled drawer (#57)
 - Snappier navigation: a dependency-free stale-while-revalidate cache renders Home, Tasks,
