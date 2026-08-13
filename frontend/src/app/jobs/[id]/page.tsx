@@ -60,14 +60,25 @@ type Job = {
 
 const API = API_BASE_URL;
 
-export default function JobDetails() {
+export default function JobDetailsPage() {
   const params = useParams<{ id: string }>();
+  if (!params.id) {
+    return null;
+  }
+  // The Versions table links between jobs on this same dynamic route. Keying
+  // the details component by id remounts it on every id change, so all
+  // per-job state (markdown, artifacts, password gate, edit mode) starts
+  // fresh instead of leaking from the previously viewed version.
+  return <JobDetails key={params.id} jobId={params.id} />;
+}
+
+function JobDetails({ jobId }: { jobId: string }) {
   // Job metadata (unlike the markdown preview) isn't gated behind the
   // document password, so it's safe to reuse: re-opening a job you already
   // viewed this session (e.g. the browser back button) paints its header
   // and status instantly instead of the loading skeleton every time.
-  const [job, setJob] = useState<Job | null>(() =>
-    params.id ? (peekCached<Job>(`/api/v1/jobs/${params.id}`) ?? null) : null
+  const [job, setJob] = useState<Job | null>(
+    () => peekCached<Job>(`/api/v1/jobs/${jobId}`) ?? null
   );
   const [markdown, setMarkdown] = useState('');
   const [draftMarkdown, setDraftMarkdown] = useState('');
@@ -146,26 +157,10 @@ export default function JobDetails() {
   };
 
   useEffect(() => {
-    const id = params.id;
-    if (!id) {
-      return;
-    }
-    // The Versions table links between jobs on this same dynamic route, so
-    // the component does NOT remount when the id changes. Reset every piece
-    // of per-job state up front: a non-FINISHED target never reaches the
-    // preview branch below, and without this reset it would keep rendering
-    // the previous version's markdown/artifacts under the new job's header.
+    // Per-job state resets are handled by the key={id} remount in
+    // JobDetailsPage; this effect only fetches.
+    const id = jobId;
     let active = true;
-    setJob(peekCached<Job>(`/api/v1/jobs/${id}`) ?? null);
-    setMarkdown('');
-    setDraftMarkdown('');
-    setArtifacts(null);
-    setVersions(null);
-    setIsEditing(false);
-    setSaveMessage(null);
-    setRequirePassword(false);
-    setPassword('');
-    setLoadError(null);
     const run = async () => {
       const jobResp = await apiFetch(`/api/v1/jobs/${id}`, { cache: 'no-store' });
       if (!active) {
@@ -216,11 +211,10 @@ export default function JobDetails() {
     return () => {
       active = false;
     };
-  }, [params]);
+  }, [jobId]);
 
   const loadMarkdownWithPassword = async () => {
-    const id = params.id;
-    if (!id) return;
+    const id = jobId;
     
     const url = new URL(`${API}/api/v1/jobs/${id}/preview`);
     if (password) {
