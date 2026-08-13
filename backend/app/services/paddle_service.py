@@ -611,21 +611,21 @@ def _call_vision_chat_api(
     except urllib.error.HTTPError as exc:
         error_body = exc.read().decode(errors='replace')
         logger.warning(
-            'VL endpoint "%s" (%s) returned HTTP %s for page %s: %s',
-            connection_label, api_base, exc.code, page_num, error_body[:400],
+            'VL endpoint "%s" returned HTTP %s for page %s: %s',
+            connection_label, exc.code, page_num, error_body[:400],
         )
         raise RuntimeError(
             f'VL endpoint "{connection_label}" returned HTTP {exc.code} for page {page_num}: {error_body[:400]}'
         ) from exc
     except urllib.error.URLError as exc:
-        logger.warning('VL endpoint "%s" (%s) unreachable: %s', connection_label, api_base, exc.reason)
+        logger.warning('VL endpoint "%s" unreachable: %s', connection_label, exc.reason)
         raise RuntimeError(
             f'VL endpoint "{connection_label}" unreachable: {exc.reason}'
         ) from exc
 
     choices = body.get('choices') or []
     if not choices:
-        logger.warning('VL endpoint "%s" (%s) returned no choices for page %s', connection_label, api_base, page_num)
+        logger.warning('VL endpoint "%s" returned no choices for page %s', connection_label, page_num)
         raise RuntimeError(f'VL endpoint "{connection_label}" returned no choices for page {page_num}')
     content = (choices[0].get('message') or {}).get('content') or ''
     return content.strip()

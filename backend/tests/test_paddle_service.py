@@ -436,8 +436,9 @@ def test_call_vision_chat_api_unreachable_omits_api_base_uses_connection_label(m
     host) must never appear in the RuntimeError raised here -- it lands
     verbatim in job.error_message, processing_info.execution.fallback_reason,
     and the benchmark report/export, all readable by any teammate who can
-    see the job/run, not just admins. The full URL is still logged for
-    operators with worker log access."""
+    see the job/run, not just admins. It is kept out of the worker log
+    stream too (which feeds the admin Logs tab); the connection label is
+    the operator-facing identifier, the URL lives in the VL connections tab."""
     secret_host = 'https://vl-internal.example.corp:9443'
 
     def fake_urlopen(req, timeout=None):
@@ -461,8 +462,9 @@ def test_call_vision_chat_api_unreachable_omits_api_base_uses_connection_label(m
     assert message == 'VL endpoint "Prod VL Connection" unreachable: connection refused'
     assert secret_host not in message
 
-    # The full URL is available to operators via worker logs.
-    assert any(secret_host in record.getMessage() for record in caplog.records)
+    # The URL stays out of the log stream as well; the label identifies the connection.
+    assert not any(secret_host in record.getMessage() for record in caplog.records)
+    assert any('Prod VL Connection' in record.getMessage() for record in caplog.records)
 
 
 def test_call_vision_chat_api_http_error_omits_api_base_uses_connection_label(monkeypatch, caplog):
@@ -488,7 +490,8 @@ def test_call_vision_chat_api_http_error_omits_api_base_uses_connection_label(mo
     message = str(exc_info.value)
     assert message == 'VL endpoint "Prod VL Connection" returned HTTP 500 for page 3: boom'
     assert secret_host not in message
-    assert any(secret_host in record.getMessage() for record in caplog.records)
+    assert not any(secret_host in record.getMessage() for record in caplog.records)
+    assert any('Prod VL Connection' in record.getMessage() for record in caplog.records)
 
 
 def test_openai_vision_to_structure_propagates_connection_label_not_base_url(monkeypatch, tmp_path):
