@@ -11,7 +11,7 @@
   "dependencies": {
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
-    "framer-motion": "^12.42.2",
+    "framer-motion": "^12.43.0",
     "lucide-react": "^1.23.0",
     "next": "16.2.11",
     "react": "19.2.7",
@@ -26,9 +26,10 @@
     "@types/node": "^26.1.0",
     "@types/react": "^19",
     "@types/react-dom": "^19",
-    "eslint": "^9",
-    "eslint-config-next": "16.2.11",
-    "tailwindcss": "^4",
+    "eslint": "^9.39.4",
+    "eslint-config-next": "16.2.12",
+    "js-yaml": "4.3.1",
+    "tailwindcss": "^4.3.3",
     "typescript": "^6"
   },
   "overrides": {

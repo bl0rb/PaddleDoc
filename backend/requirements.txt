@@ -1,6 +1,6 @@
-fastapi==0.116.1
-uvicorn[standard]==0.35.0
-pydantic==2.11.7
+fastapi==0.141.1
+uvicorn[standard]==0.52.0
+pydantic==2.13.4
 pydantic-settings==2.14.2
 sqlalchemy==2.0.51
 psycopg[binary]==3.3.4
@@ -10,8 +10,8 @@ redis==6.2.0
 python-multipart==0.0.31
 pytest==9.1.0
 httpx==0.28.1
-pypdf==6.14.2
-xlrd==2.0.1
+pypdf==6.15.0
+xlrd==2.0.2
 bcrypt==5.0.0
 cryptography==50.0.0
 authlib==1.7.2
