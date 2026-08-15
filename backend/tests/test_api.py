@@ -129,6 +129,65 @@ def test_upload_allows_missing_email(monkeypatch, tmp_path):
     assert called['email'] == ''
 
 
+def test_eml_upload_creates_job_like_normal_document(monkeypatch, tmp_path):
+    """Test that .eml files can be uploaded through the normal upload flow and create a Job."""
+    from app.api import routes
+    from app.core.config import settings
+    from email.mime.text import MIMEText
+
+    settings.uploads_dir = tmp_path / 'uploads'
+    settings.results_dir = tmp_path / 'results'
+
+    # Create a simple .eml file
+    msg = MIMEText('Email body content', 'plain')
+    msg['Subject'] = 'Test Email'
+    msg['From'] = 'sender@example.com'
+    msg['To'] = 'recipient@example.com'
+    eml_content = msg.as_bytes()
+
+    called = {}
+
+    def fake_delay(
+        job_id: str,
+        profile_id: str | None = None,
+        mode: str | None = None,
+        email: str | None = None,
+        department: str | None = None,
+    ):
+        called['job_id'] = job_id
+        called['profile_id'] = profile_id
+        called['mode'] = mode
+        called['email'] = email
+        called['department'] = department
+
+    monkeypatch.setattr(routes.process_job, 'delay', fake_delay)
+
+    response = client.post(
+        '/api/v1/upload',
+        files={'file': ('message.eml', eml_content, 'message/rfc822')},
+        data={'profile_id': 'ppocrv6_tiny', 'email': 'test@example.com', 'tags': 'inbox'},
+    )
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload['status'] == JobStatus.PENDING.value
+    assert 'job_id' in payload
+    assert called['job_id'] == payload['job_id']
+    assert called['profile_id'] == 'ppocrv6_tiny'
+    assert called['mode'] == 'single'
+    assert called['email'] == 'test@example.com'
+
+    db = TestingSessionLocal()
+    job = db.get(Job, payload['job_id'])
+    assert job is not None
+    assert job.original_filename == 'message.eml'
+    assert '/inbox/' in job.upload_path.replace('\\', '/')
+    assert job.upload_content == eml_content
+    assert job.upload_mime_type == 'message/rfc822'
+    assert job.upload_size_bytes == len(eml_content)
+    assert sorted(tag.name for tag in job.tags) == ['inbox']
+    db.close()
+
+
 def test_collection_flow(monkeypatch, tmp_path):
     from app.api import routes
     from app.core.config import settings

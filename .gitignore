@@ -21,3 +21,4 @@ pictures/
 *-build.txt
 *-result.txt
 _out.txt
+backend/paddledoc.db

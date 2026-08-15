@@ -2,7 +2,7 @@
 
 import { useRef, useState } from 'react';
 import { AnimatePresence, motion } from 'framer-motion';
-import { Mail, Sparkles, UploadCloud } from 'lucide-react';
+import { Sparkles, UploadCloud } from 'lucide-react';
 import { useRouter } from 'next/navigation';
 
 import { Button } from '@/components/ui/button';
@@ -541,16 +541,6 @@ export function ProcessingFlow() {
                   <p className="text-sm font-semibold text-slate-950">Import from Confluence</p>
                   <p className="mt-1 text-xs text-slate-600">Crawl a space or page tree into markdown jobs.</p>
                 </button>
-                <button
-                  type="button"
-                  onClick={() => router.push('/mail')}
-                  className="rounded-xl border border-slate-200 bg-white p-4 text-left transition hover:border-emerald-300 hover:bg-emerald-50"
-                >
-                  <p className="flex items-center gap-2 text-sm font-semibold text-slate-950">
-                    <Mail className="h-4 w-4 text-slate-500" /> Upload email
-                  </p>
-                  <p className="mt-1 text-xs text-slate-600">Ingest a raw .eml file and process its attachments.</p>
-                </button>
               </div>
               <div className="grid gap-3 md:grid-cols-2">
                 <label className="text-sm text-slate-600">
@@ -713,7 +703,7 @@ export function ProcessingFlow() {
                       type="file"
                       multiple
                       className="hidden"
-                      accept=".pdf,.docx,.pptx,.xlsx,.xls,.png,.jpg,.jpeg"
+                      accept=".pdf,.docx,.pptx,.xlsx,.xls,.png,.jpg,.jpeg,.eml,message/rfc822"
                       onChange={async (event) => {
                         const files = event.currentTarget.files;
                         if (files) {
@@ -767,7 +757,7 @@ export function ProcessingFlow() {
                 >
                   <UploadCloud className="mx-auto mb-4 h-10 w-10 text-slate-600" />
                   <p className="mb-2 text-lg font-medium">Drag and drop file here</p>
-                  <p className="mb-4 text-sm text-slate-600">PDF, DOCX, PPTX, XLSX, XLS, PNG, JPG, JPEG (max. 100 MB)</p>
+                  <p className="mb-4 text-sm text-slate-600">PDF, DOCX, PPTX, XLSX, XLS, PNG, JPG, JPEG, EML (max. 100 MB)</p>
                   <p className="mb-4 text-xs text-slate-500">
                     Target folder: {folder.trim() || 'single'}{subfolder.trim() ? ` / ${subfolder.trim()}` : ''}
                   </p>
@@ -775,7 +765,7 @@ export function ProcessingFlow() {
                     ref={singleFileInputRef}
                     type="file"
                     className="hidden"
-                    accept=".pdf,.docx,.pptx,.xlsx,.xls,.png,.jpg,.jpeg"
+                    accept=".pdf,.docx,.pptx,.xlsx,.xls,.png,.jpg,.jpeg,.eml,message/rfc822"
                     onChange={async (event) => {
                       const file = event.currentTarget.files?.[0];
                       if (file) {

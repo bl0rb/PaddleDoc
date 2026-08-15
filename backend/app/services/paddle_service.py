@@ -9,6 +9,7 @@ import re
 import time
 import urllib.error
 import urllib.request
+from io import BytesIO
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import cast
@@ -20,6 +21,12 @@ import yaml
 
 from app.core.config import settings
 from app.services.quality_gate import evaluate_document_quality
+from app.services.mail_ingest import (
+    _parse_bytes as _parse_eml_bytes,
+    _walk_tree,
+    _render_body,
+    _extract_envelope,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -936,6 +943,102 @@ def _resolve_profile(profile_id: str | None) -> tuple[str, dict[str, str]]:
     return requested_profile, _PADDLE_PROFILES[requested_profile]
 
 
+def _eml_to_markdown(
+    source: Path,
+    selected_profile_id: str,
+    selected_profile: dict[str, str],
+    metadata: dict[str, object] | None = None,
+) -> tuple[str, int]:
+    """Convert a .eml (RFC-822 email) file to markdown.
+
+    Returns (markdown_content, page_count_for_attachments).
+    The function:
+    1. Parses the email envelope and body
+    2. Renders the body (HTML or plain text) to markdown
+    3. For each attachment, if supported, processes it through the conversion pipeline
+    4. Combines them all into one markdown document
+
+    This is used as a first-class document handler (not tied to mail ingestion),
+    so it uses the standard frontmatter/versioning like any other document type.
+    """
+    from app.services.confluence_markdown import html_to_markdown
+
+    # Read and parse the .eml file
+    raw_eml = source.read_bytes()
+    msg = _parse_eml_bytes(raw_eml)
+    envelope = _extract_envelope(msg)
+    chosen_body, leaves = _walk_tree(msg)
+
+    sections: list[str] = []
+    total_attachment_pages = 0
+
+    # Render the email body
+    if chosen_body is not None:
+        content_type = chosen_body.get_content_type()
+        if content_type == 'text/html':
+            html_content = chosen_body.get_content()
+            if not isinstance(html_content, str):
+                html_content = html_content.decode('utf-8', errors='replace')
+            # Use the same HTML->markdown conversion as mail_ingest
+            rendered, _images, _links = html_to_markdown(html_content, base_url='', capture_attachments=False)
+        else:
+            text_content = chosen_body.get_content()
+            rendered = text_content if isinstance(text_content, str) else text_content.decode('utf-8', errors='replace')
+
+        if rendered.strip():
+            sections.append(rendered.strip())
+
+    # Process attachments
+    for leaf in leaves:
+        if leaf.outcome != 'job':
+            # Skip inline and skipped attachments
+            if leaf.outcome == 'skipped' and leaf.skip_reason:
+                sections.append(f'(skipped: {leaf.filename} — {leaf.skip_reason})')
+            continue
+
+        # This is a job-outcome attachment — process it through the pipeline
+        try:
+            # Write the attachment to a temporary file
+            temp_file = Path(source.parent) / f'_temp_attachment_{leaf.index}_{leaf.filename}'
+            temp_file.write_bytes(leaf.content)
+
+            try:
+                # Recursively convert the attachment using the same profile
+                attachment_md, attachment_details = convert_to_markdown_with_details(
+                    str(temp_file),
+                    profile_id=selected_profile_id,
+                    metadata=metadata,
+                )
+
+                # Extract just the body (strip frontmatter)
+                parts = attachment_md.split('---\n', 2)
+                if len(parts) >= 3:
+                    attachment_body = parts[2].strip()
+                else:
+                    attachment_body = attachment_md.strip()
+
+                # Add as an attachment section
+                if attachment_body:
+                    sections.append(f'## Attachment: {leaf.filename}\n\n{attachment_body}')
+
+                # Sum up pages
+                if isinstance(attachment_details.get('page_count'), int):
+                    total_attachment_pages += attachment_details['page_count']
+            finally:
+                temp_file.unlink(missing_ok=True)
+        except Exception as exc:
+            # If attachment conversion fails, log it as skipped
+            sections.append(f'(skipped: {leaf.filename} — conversion error: {str(exc)[:50]})')
+
+    # Combine all sections
+    body = '\n\n---\n\n'.join(sections) if sections else '(empty email)'
+
+    # page_count is 1 for the email body + sum of attachment pages
+    page_count = max(1, total_attachment_pages)
+
+    return body, page_count
+
+
 def _fallback_convert_with_frontmatter(
     source: Path,
     suffix: str,
@@ -1000,9 +1103,36 @@ def convert_to_markdown_with_details(
 
     selected_profile_id, selected_profile = _resolve_profile(profile_id)
     capability = _runtime_capability()
+    suffix = source.suffix.lower()
+
+    # .eml (email) files are processed directly without PaddleOCR dependency
+    if suffix == '.eml':
+        try:
+            body, page_count = _eml_to_markdown(source, selected_profile_id, selected_profile, metadata)
+            frontmatter_metadata = {
+                **(metadata or {}),
+                'profile_id': selected_profile_id,
+                'engine': 'mail-eml',
+                'used_fallback': False,
+            }
+            frontmatter = _build_rag_frontmatter(
+                source.name, page_count, selected_profile['label'], metadata=frontmatter_metadata
+            )
+            markdown = ('\n\n---\n\n'.join([frontmatter, body])).strip()
+            quality_gate = evaluate_document_quality(markdown)
+            return markdown, {
+                'engine': 'mail-eml',
+                'used_fallback': False,
+                'profile_id': selected_profile_id,
+                'profile_label': selected_profile['label'],
+                'page_count': page_count,
+                'quality_gate': quality_gate,
+                **capability,
+            }
+        except Exception as exc:
+            raise RuntimeError(f'Failed to convert .eml file: {exc}') from exc
 
     if not _paddleocr_available():
-        suffix = source.suffix.lower()
         if suffix in {'.pdf', '.xls', '.xlsx'}:
             return _fallback_convert_with_frontmatter(
                 source, suffix, selected_profile_id, selected_profile, metadata,

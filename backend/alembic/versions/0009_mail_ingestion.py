@@ -30,7 +30,7 @@ def upgrade() -> None:
         sa.Column('from_address', sa.String(length=998), nullable=False, server_default=''),
         sa.Column('recipients', sa.JSON(), nullable=False),
         sa.Column('sent_at', sa.DateTime(timezone=True), nullable=True),
-        sa.Column('source', sa.String(length=64), nullable=False, server_default=''),
+        sa.Column('source', sa.String(length=64), nullable=False, server_default='api'),
         sa.Column('raw_content', sa.LargeBinary(), nullable=False),
         sa.Column('raw_size_bytes', sa.Integer(), nullable=False),
         sa.Column('body_format', sa.String(length=32), nullable=True),

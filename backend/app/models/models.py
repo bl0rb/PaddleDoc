@@ -607,9 +607,9 @@ class MailMessage(Base):
     # {"to": [...], "cc": [...]} decoded address lists.
     recipients: Mapped[dict] = mapped_column(JSON, default=dict, nullable=False)
     sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
-    # Free-form client label from the ?source= query param (e.g.
-    # 'mail-gateway', 'n8n'); not validated against a fixed set.
-    source: Mapped[str] = mapped_column(String(64), default='', server_default='', nullable=False)
+    # 'api' for POST /mail/messages, 'upload' for .eml files uploaded via UI.
+    # Not validated against a fixed set; free-form extensible for future origins.
+    source: Mapped[str] = mapped_column(String(64), default='api', server_default='api', nullable=False)
     # The original .eml, verbatim -- served by the raw-download endpoint.
     # Must be deferred on every list/lookup query except that one (mirror
     # _JOB_BLOB_DEFER_OPTIONS / _ARTIFACT_BLOB_DEFER_OPTIONS via

@@ -5,6 +5,19 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+- Processing and Mail are now cleanly separated by intent: the Processing page handles
+  every manual upload — including `.eml`, which joins the normal file picker and produces
+  one regular job whose markdown contains the rendered mail body plus each attachment as
+  its own section (converted with the selected OCR profile), with the standard frontmatter,
+  folder/tags/password settings, and content-hash versioning like any other document. The
+  Mail page now exclusively shows messages ingested programmatically via
+  `POST /api/v1/mail/messages` (list locked to `source=api`); its manual upload zone moved
+  to Processing. API ingestion keeps its own `profile_id` parameter (falls back to the
+  configured default profile), and mail messages default to `source=api`
+
 ## [1.3.0] - 2026-08-15
 
 ### Added

@@ -6,7 +6,7 @@ from fastapi import HTTPException, UploadFile, status
 
 from app.core.config import settings
 
-ALLOWED_EXTENSIONS = {'.pdf', '.docx', '.pptx', '.xlsx', '.xls', '.png', '.jpg', '.jpeg'}
+ALLOWED_EXTENSIONS = {'.pdf', '.docx', '.pptx', '.xlsx', '.xls', '.png', '.jpg', '.jpeg', '.eml'}
 ALLOWED_MIME_TYPES = {
     'application/pdf',
     'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
@@ -15,6 +15,7 @@ ALLOWED_MIME_TYPES = {
     'application/vnd.ms-excel',
     'image/png',
     'image/jpeg',
+    'message/rfc822',
 }
 
 _EXTENSION_TO_MIME_TYPES: dict[str, set[str]] = {
@@ -26,6 +27,7 @@ _EXTENSION_TO_MIME_TYPES: dict[str, set[str]] = {
     '.png': {'image/png'},
     '.jpg': {'image/jpeg'},
     '.jpeg': {'image/jpeg'},
+    '.eml': {'message/rfc822'},
 }
 
 _GENERIC_MIME_TYPES = {'', 'application/octet-stream', 'binary/octet-stream'}

@@ -656,3 +656,215 @@ def test_test_vl_connection_url_error(monkeypatch):
     assert result['ok'] is False
     assert 'Unreachable' in result['detail']
     assert isinstance(result['latency_ms'], int)
+
+
+# --- FEATURE: .eml (RFC-822 email) upload support ----------------------------
+
+def test_eml_plain_text_body_no_attachments(tmp_path, monkeypatch):
+    """Test .eml conversion with plain text body and no attachments."""
+    from email.mime.text import MIMEText
+
+    msg = MIMEText('This is the email body text.', 'plain')
+    msg['Subject'] = 'Test Email'
+    msg['From'] = 'sender@example.com'
+    msg['To'] = 'recipient@example.com'
+
+    eml_file = tmp_path / 'test.eml'
+    eml_file.write_bytes(msg.as_bytes())
+
+    monkeypatch.setattr(paddle_service, 'get_paddle_settings', lambda: {
+        'default_profile': 'ppocrv6_tiny',
+        'timeout_seconds': 30,
+    })
+
+    markdown, details = paddle_service.convert_to_markdown_with_details(str(eml_file), profile_id='ppocrv6_tiny')
+
+    # Check frontmatter
+    assert markdown.startswith('---\n')
+    assert 'engine: mail-eml' in markdown
+    assert 'source: test.eml' in markdown
+    assert 'profile_id: ppocrv6_tiny' in markdown
+
+    # Check body is present
+    assert 'This is the email body text.' in markdown
+    assert details['engine'] == 'mail-eml'
+    assert details['used_fallback'] is False
+    assert details['page_count'] >= 1
+    assert details['quality_gate']['grade'] in {'A', 'B', 'C'}
+
+
+def test_eml_html_body(tmp_path, monkeypatch):
+    """Test .eml conversion with HTML body."""
+    from email.mime.text import MIMEText
+
+    html_content = '<html><body><h1>Hello</h1><p>This is HTML email.</p></body></html>'
+    msg = MIMEText(html_content, 'html')
+    msg['Subject'] = 'HTML Email'
+    msg['From'] = 'sender@example.com'
+
+    eml_file = tmp_path / 'html_test.eml'
+    eml_file.write_bytes(msg.as_bytes())
+
+    monkeypatch.setattr(paddle_service, 'get_paddle_settings', lambda: {
+        'default_profile': 'ppocrv6_tiny',
+        'timeout_seconds': 30,
+    })
+
+    markdown, details = paddle_service.convert_to_markdown_with_details(str(eml_file), profile_id='ppocrv6_tiny')
+
+    # HTML should be converted to markdown
+    assert 'Hello' in markdown
+    assert 'This is HTML email.' in markdown
+    assert details['engine'] == 'mail-eml'
+
+
+def test_eml_with_supported_attachment(tmp_path, monkeypatch):
+    """Test .eml with a supported attachment (PNG image).
+
+    This test verifies that:
+    1. Email body is preserved
+    2. Supported attachments are recognized and processed
+    3. Page count reflects attachment pages
+    """
+    from email.mime.text import MIMEText
+    from email.mime.image import MIMEImage
+    from email.mime.multipart import MIMEMultipart
+
+    msg = MIMEMultipart()
+    msg['Subject'] = 'Email with Attachment'
+    msg['From'] = 'sender@example.com'
+    msg['To'] = 'recipient@example.com'
+
+    # Add text body
+    text_part = MIMEText('Email with an image attachment.', 'plain')
+    msg.attach(text_part)
+
+    # Add a fake PNG image (minimal PNG header)
+    fake_png = b'\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01\x08\x02\x00\x00\x00\x90wS\xde'
+    img_part = MIMEImage(fake_png, _subtype='png')
+    img_part.add_header('Content-Disposition', 'attachment', filename='test.png')
+    msg.attach(img_part)
+
+    eml_file = tmp_path / 'with_attachment.eml'
+    eml_file.write_bytes(msg.as_bytes())
+
+    # Mock the attachment conversion so we can verify the flow without needing actual OCR
+    # We need to be careful: we only mock the internal call to convert_to_markdown_with_details
+    # that _eml_to_markdown makes for attachments, not the top-level call itself
+    original_convert = paddle_service.convert_to_markdown_with_details
+
+    def selective_mock_convert(input_path, profile_id=None, metadata=None, vl_override=None):
+        # If this is being called on a .png file (the attachment), mock it
+        if str(input_path).endswith('.png'):
+            return '# Converted PNG\n\nSome text extracted from image.', {
+                'engine': 'paddleocr',
+                'used_fallback': False,
+                'page_count': 1,
+                'quality_gate': {'grade': 'A', 'recommendation': 'allow'},
+                'profile_id': profile_id or 'ppocrv6_tiny',
+            }
+        # Otherwise use the real function (for the .eml file itself)
+        return original_convert(input_path, profile_id, metadata, vl_override)
+
+    monkeypatch.setattr(paddle_service, 'convert_to_markdown_with_details', selective_mock_convert)
+    monkeypatch.setattr(paddle_service, 'get_paddle_settings', lambda: {
+        'default_profile': 'ppocrv6_tiny',
+        'timeout_seconds': 30,
+    })
+
+    markdown, details = paddle_service.convert_to_markdown_with_details(str(eml_file), profile_id='ppocrv6_tiny')
+
+    # Check email body and attachment section are present
+    assert 'Email with an image attachment.' in markdown
+    assert '## Attachment: test.png' in markdown
+    assert 'Converted PNG' in markdown
+    assert details['engine'] == 'mail-eml'
+    assert details['page_count'] >= 1
+
+
+def test_eml_with_unsupported_attachment(tmp_path, monkeypatch):
+    """Test .eml with unsupported attachment (.xyz) marked as skipped."""
+    from email.mime.text import MIMEText
+    from email.mime.base import MIMEBase
+    from email.mime.multipart import MIMEMultipart
+    from email import encoders
+
+    msg = MIMEMultipart()
+    msg['Subject'] = 'Email with Unsupported Attachment'
+    msg['From'] = 'sender@example.com'
+
+    # Add text body
+    text_part = MIMEText('Email body with unsupported file.', 'plain')
+    msg.attach(text_part)
+
+    # Add an unsupported file type
+    unsupported_part = MIMEBase('application', 'x-xyz')
+    unsupported_part.set_payload(b'unsupported binary data')
+    encoders.encode_base64(unsupported_part)
+    unsupported_part.add_header('Content-Disposition', 'attachment', filename='document.xyz')
+    msg.attach(unsupported_part)
+
+    eml_file = tmp_path / 'with_unsupported.eml'
+    eml_file.write_bytes(msg.as_bytes())
+
+    # No need to mock if we're not calling convert_to_markdown_with_details recursively
+    # but for consistency, we can keep the monkeypatch calls
+    monkeypatch.setattr(paddle_service, 'get_paddle_settings', lambda: {
+        'default_profile': 'ppocrv6_tiny',
+        'timeout_seconds': 30,
+    })
+
+    markdown, details = paddle_service.convert_to_markdown_with_details(str(eml_file), profile_id='ppocrv6_tiny')
+
+    # Check email body is present
+    assert 'Email body with unsupported file.' in markdown
+    # Check unsupported attachment is noted as skipped
+    assert 'skipped:' in markdown.lower()
+    assert 'document.xyz' in markdown
+    assert 'unsupported_type' in markdown
+    assert details['engine'] == 'mail-eml'
+
+
+def test_eml_conversion_includes_standard_frontmatter(tmp_path, monkeypatch):
+    """Test that .eml produces markdown with all standard frontmatter keys."""
+    from email.mime.text import MIMEText
+
+    msg = MIMEText('Test body', 'plain')
+    msg['Subject'] = 'Frontmatter Test'
+    msg['From'] = 'test@example.com'
+
+    eml_file = tmp_path / 'frontmatter_test.eml'
+    eml_file.write_bytes(msg.as_bytes())
+
+    monkeypatch.setattr(paddle_service, 'get_paddle_settings', lambda: {
+        'default_profile': 'ppocrv6_tiny',
+        'timeout_seconds': 30,
+    })
+
+    metadata = {
+        'job_id': 'test-job-123',
+        'document_version': 1,
+        'content_sha256': 'abc123def456',
+        'profile_id': 'ppocrv6_tiny',
+        'engine': 'mail-eml',
+    }
+
+    markdown, _ = paddle_service.convert_to_markdown_with_details(
+        str(eml_file), profile_id='ppocrv6_tiny', metadata=metadata
+    )
+
+    # Parse frontmatter
+    assert markdown.startswith('---\n')
+    parts = markdown.split('---\n', 2)
+    assert len(parts) >= 3
+    frontmatter = parts[1]
+
+    # Check standard keys
+    assert 'source: frontmatter_test.eml' in frontmatter
+    assert 'engine: mail-eml' in frontmatter
+    assert 'pages:' in frontmatter
+    assert 'profile_id: ppocrv6_tiny' in frontmatter
+    assert 'job_id: test-job-123' in frontmatter
+    assert 'document_version: 1' in frontmatter
+    assert 'content_sha256: abc123def456' in frontmatter
+    assert 'processed_at:' in frontmatter

@@ -326,7 +326,7 @@ async def ingest_mail_message(
     folder: str = Query(default='mail'),
     subfolder: str = Query(default=''),
     tags: str = Query(default=''),
-    source: str = Query(default=''),
+    source: str = Query(default='api'),
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
 ) -> Response:
@@ -334,6 +334,14 @@ async def ingest_mail_message(
     contract) or `multipart/form-data` with a single `file` part (curl -F /
     n8n form-mode convenience) -- same query parameters, accepted as form
     fields instead in the latter case. See docs/integrations/mail-ingestion.md.
+
+    Query/form parameters:
+    - profile_id: OCR profile (default: ppocrv6_tiny). Applied to all
+      attachment jobs.
+    - folder, subfolder: Storage path (default: 'mail').
+    - tags: Comma-separated tags to apply to attachment jobs.
+    - source: Origin label; 'api' for API ingest, 'upload' for UI .eml files
+      (default: 'api').
 
     Rate limiting is intentionally skipped here, following the
     collection-bulk-upload precedent (see
