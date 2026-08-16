@@ -5,6 +5,7 @@ import Link from 'next/link';
 import { usePathname } from 'next/navigation';
 import { Home, Menu, X, Cpu, FolderOpen, Gauge, Mail, Settings, Shield, LogOut } from 'lucide-react';
 import { useAuth } from '@/lib/auth-context';
+import { PaddleDocLogo } from '@/components/paddledoc-logo';
 
 const links = [
   { href: '/', label: 'Home', icon: Home },
@@ -67,9 +68,7 @@ export function SidebarNav() {
         }`}
       >
         <div className="flex items-center gap-3 border-b border-slate-100 px-5 py-4">
-          <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-emerald-600">
-            <Cpu className="h-4 w-4 text-white" />
-          </div>
+          <PaddleDocLogo className="h-8 w-8" />
           <span className="text-base font-semibold text-slate-950">PaddleDoc</span>
         </div>
 

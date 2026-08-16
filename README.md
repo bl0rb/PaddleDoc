@@ -1,4 +1,4 @@
-# PaddleDoc
+# <img src="docs/logo.svg" width="30" alt="" align="top"> PaddleDoc
 
 PaddleDoc is a document processing platform powered by PaddleOCR that converts PDFs, Office files, Mails and images into structured Markdown for RAG and AI pipelines.
 

@@ -1,4 +1,6 @@
-import { AlertCircle, Cpu } from 'lucide-react';
+import { AlertCircle } from 'lucide-react';
+
+import { PaddleDocLogo } from '@/components/paddledoc-logo';
 
 /**
  * Centered full-page shell for the auth pages (/login, /setup):
@@ -17,9 +19,7 @@ export function AuthShell({
     <main className="flex min-h-screen items-center justify-center bg-slate-50 px-4 py-12">
       <div className="w-full max-w-sm">
         <div className="mb-6 flex flex-col items-center gap-3">
-          <div className="flex h-12 w-12 items-center justify-center rounded-2xl bg-emerald-600 shadow-md shadow-emerald-600/20">
-            <Cpu className="h-6 w-6 text-white" />
-          </div>
+          <PaddleDocLogo className="h-12 w-12 drop-shadow-md" />
           <span className="text-lg font-semibold text-slate-950">PaddleDoc</span>
         </div>
 
