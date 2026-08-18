@@ -15,6 +15,7 @@ doc:
 """
 
 import json
+import logging
 import secrets
 from datetime import datetime, timedelta, timezone
 from urllib.parse import urlencode, urlsplit
@@ -30,6 +31,7 @@ from sqlalchemy.orm import Session
 from app.api.deps import (
     SESSION_COOKIE_NAME,
     SESSION_SLIDING_WINDOW,
+    aware_utc,
     get_current_user,
     origin_guard,
     require_admin,
@@ -88,6 +90,7 @@ from app.services.security import (
     decrypt_vl_api_key,
     encrypt_client_secret,
     encrypt_vl_api_key,
+    DUMMY_PASSWORD_HASH,
     enforce_rate_limit,
     generate_session_token,
     hash_password,
@@ -97,6 +100,8 @@ from app.services.security import (
     unsign_value,
     verify_password,
 )
+
+logger = logging.getLogger(__name__)
 
 router_public = APIRouter(prefix='/api/v1/auth', tags=['auth'], dependencies=[Depends(origin_guard)])
 router_authenticated = APIRouter(
@@ -113,8 +118,25 @@ _SETUP_ADVISORY_LOCK_KEY = 918273645
 
 # A fixed, valid bcrypt digest of a random string nobody knows. Used to spend
 # the same ~bcrypt time on logins for unknown/OIDC-only accounts as for real
-# ones, closing the username-enumeration timing side-channel.
-_DUMMY_PASSWORD_HASH = '$2b$12$0dWbhp.Mm4hFrTNrFotMn.2lgDSumJrdRHfgOSWOjj6f/8zo3Wlsu'
+# ones, closing the username-enumeration timing side-channel. Re-exported via
+# app.services.security so the job-password check can use the same constant
+# without importing this endpoint module.
+_DUMMY_PASSWORD_HASH = DUMMY_PASSWORD_HASH
+
+# --- Per-account login throttling -------------------------------------------
+#
+# The general rate limiter (enforce_rate_limit) caps REQUESTS per client; it
+# does nothing about one attacker grinding a single known username from many
+# addresses, and it deliberately fails open when Redis is unavailable. These
+# thresholds cap FAILED ATTEMPTS per account and live in the database, so the
+# brake also holds during a Redis outage.
+#
+# Deliberately not keyed by IP: behind NAT or a reverse proxy every member
+# shares one address, and an IP-scoped account lock would let one person's
+# typos lock out everyone else.
+_LOGIN_MAX_FAILED_ATTEMPTS = 10
+_LOGIN_FAILURE_WINDOW = timedelta(minutes=15)
+_LOGIN_LOCKOUT_DURATION = timedelta(minutes=15)
 
 _OIDC_STATE_COOKIE = 'paddledoc_oidc_state'
 _OIDC_STATE_TTL = timedelta(minutes=10)
@@ -260,6 +282,43 @@ def setup(payload: SetupRequest, request: Request, response: Response, db: Sessi
     return _user_response(user)
 
 
+def _login_locked(user: User | None, now: datetime) -> bool:
+    """Is this account currently in a lockout window?"""
+    if user is None or user.locked_until is None:
+        return False
+    return aware_utc(user.locked_until) > now
+
+
+def _register_failed_login(db: Session, user: User, now: datetime) -> None:
+    """Count one failed attempt and lock the account once the threshold is hit.
+
+    The streak restarts when the previous failure is older than the window, so
+    occasional typos spread over a day never accumulate into a lockout.
+    """
+    last_failure = aware_utc(user.last_failed_login_at) if user.last_failed_login_at else None
+    if last_failure is None or now - last_failure > _LOGIN_FAILURE_WINDOW:
+        user.failed_login_count = 0
+
+    user.failed_login_count += 1
+    user.last_failed_login_at = now
+
+    if user.failed_login_count >= _LOGIN_MAX_FAILED_ATTEMPTS:
+        user.locked_until = now + _LOGIN_LOCKOUT_DURATION
+        user.failed_login_count = 0
+        logger.warning('login locked for user %s until %s', user.id, user.locked_until)
+
+    db.commit()
+
+
+def _clear_failed_logins(db: Session, user: User) -> None:
+    """Reset the counter after a successful login."""
+    if user.failed_login_count or user.last_failed_login_at or user.locked_until:
+        user.failed_login_count = 0
+        user.last_failed_login_at = None
+        user.locked_until = None
+        db.commit()
+
+
 # --- public: local login -------------------------------------------------------
 
 @router_public.post('/login', response_model=UserResponse)
@@ -276,12 +335,24 @@ def login(payload: LoginRequest, request: Request, response: Response, db: Sessi
     password_hash = user.password_hash if user is not None and user.password_hash is not None else _DUMMY_PASSWORD_HASH
     password_ok = verify_password(payload.password, password_hash)
 
+    now = datetime.now(timezone.utc)
+    locked = _login_locked(user, now)
+
     # One generic 401 for every failure mode (unknown identifier, wrong
-    # password, inactive account, OIDC-only account with no local password)
-    # -- never reveal which one applies.
-    if user is None or not user.is_active or user.password_hash is None or not password_ok:
+    # password, inactive account, OIDC-only account with no local password,
+    # locked account) -- never reveal which one applies. In particular a
+    # lockout must not be announced, or it would answer "does this account
+    # exist?" for anyone willing to fail ten times.
+    if user is None or not user.is_active or user.password_hash is None or not password_ok or locked:
+        # Only count attempts against a real, unlocked account: an unknown
+        # identifier has no row to count on (the per-client rate limiter
+        # covers spraying), and re-counting during an active lockout would
+        # extend it indefinitely.
+        if user is not None and not locked:
+            _register_failed_login(db, user, now)
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail='Invalid credentials')
 
+    _clear_failed_logins(db, user)
     _create_session(db, request, response, user)
     return _user_response(user)
 

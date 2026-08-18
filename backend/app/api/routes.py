@@ -50,7 +50,7 @@ from app.services.paddle_service import (
     get_paddle_status,
     update_paddle_settings,
 )
-from app.services.security import enforce_rate_limit, hash_password, verify_password
+from app.services.security import DUMMY_PASSWORD_HASH, enforce_rate_limit, hash_password, verify_password
 from app.services.storage import build_result_path, save_upload
 from app.workers.celery_app import celery_app
 from app.workers.tasks import process_job
@@ -279,14 +279,20 @@ def _job_count(
 
 
 def _check_job_password(job: Job, password: str | None) -> None:
-    """Verify job password if it's protected."""
+    """Verify a job password, if the job is protected.
+
+    Same discipline as the login path in app/api/auth.py: one bcrypt
+    verification is always performed and every failure mode gets the same
+    generic 401, so neither the response time nor the message reveals whether
+    a given job carries a password at all.
+    """
+    password_hash = job.password_hash or DUMMY_PASSWORD_HASH
+    password_ok = verify_password(password or '', password_hash)
+
     if not job.password_hash:
-        return  # No password protection
-    
-    if not password:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail='Password required')
-    
-    if not verify_password(password, job.password_hash):
+        return
+
+    if not password or not password_ok:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail='Invalid password')
 
 

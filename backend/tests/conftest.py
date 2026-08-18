@@ -22,6 +22,7 @@ from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
+from app.core.config import settings
 from app.database.session import get_db
 from app.main import app
 from app.models.models import Base, User, UserRole
@@ -90,7 +91,15 @@ def override_get_db():
 
 
 app.dependency_overrides[get_db] = override_get_db
-client = TestClient(app)
+
+# Browsers always send Origin on a state-changing request; origin_guard now
+# relies on that (a cookie-carrying POST without Origin or Referer is treated
+# as cross-site and rejected). The TestClient does not set the header on its
+# own, so both clients below carry the configured frontend origin to stay a
+# faithful stand-in for a real browser.
+BROWSER_HEADERS = {'Origin': settings.cors_origins[0]}
+
+client = TestClient(app, headers=BROWSER_HEADERS)
 
 
 # --- Step 3 authz test helpers -----------------------------------------------
@@ -139,7 +148,7 @@ def create_test_user(
 def login_as(identifier: str, password: str = DEFAULT_TEST_PASSWORD) -> TestClient:
     """A fresh, isolated-cookie-jar TestClient logged in as the given user
     (matched by username or email, same as the real /auth/login endpoint)."""
-    authed_client = TestClient(app)
+    authed_client = TestClient(app, headers=BROWSER_HEADERS)
     resp = authed_client.post('/api/v1/auth/login', json={'identifier': identifier, 'password': password})
     assert resp.status_code == 200, resp.text
     return authed_client

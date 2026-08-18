@@ -21,7 +21,7 @@ import app.api.auth as auth_module
 from app.main import app
 from app.models.models import AuthProvider, Job, JobStatus, Session as SessionModel, User, UserRole, WorkerLogEntry
 from app.services.security import encrypt_client_secret, hash_password, rate_limiter
-from conftest import TestingSessionLocal
+from conftest import BROWSER_HEADERS, TestingSessionLocal
 
 
 @pytest.fixture(autouse=True)
@@ -40,7 +40,7 @@ def _reset_rate_limiter():
 def client() -> TestClient:
     """A fresh cookie jar per test. `app.dependency_overrides[get_db]` is
     already wired up once, process-wide, in conftest.py."""
-    return TestClient(app)
+    return TestClient(app, headers=BROWSER_HEADERS)
 
 
 def _db():

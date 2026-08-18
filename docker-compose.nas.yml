@@ -2,32 +2,50 @@ name: paddledoc
 
 services:
   postgres:
+    # No extra kernel privileges, no privilege escalation inside the
+    # container -- mirrors the Helm chart containerSecurityContext.
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
     image: postgres:16
     restart: always
     container_name: paddledoc_postgres
     environment:
       POSTGRES_DB: ${POSTGRES_DB:-paddledoc}
       POSTGRES_USER: ${POSTGRES_USER:-paddledoc}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-change-me}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required (run scripts/init-env.sh or set it in .env)}
     volumes:
       - ./nas-data/postgres:/var/lib/postgresql/data:rw
     networks:
       - paddledoc_netbridge
 
   redis:
+    # No extra kernel privileges, no privilege escalation inside the
+    # container -- mirrors the Helm chart containerSecurityContext.
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
     image: redis:7
     restart: always
     container_name: paddledoc_redis
     # requirepass keeps Redis (Celery broker + result backend) from sitting
     # open on the compose network. Override REDIS_PASSWORD in a .env file for
     # anything beyond NAS dev; backend/worker REDIS_URL below must match.
-    command: ["redis-server", "--save", "60", "1", "--loglevel", "warning", "--requirepass", "${REDIS_PASSWORD:-paddledoc-dev-redis-password}"]
+    command: ["redis-server", "--save", "60", "1", "--loglevel", "warning", "--requirepass", "${REDIS_PASSWORD:?REDIS_PASSWORD is required (run scripts/init-env.sh or set it in .env)}"]
     volumes:
       - ./nas-data/redis:/data:rw
     networks:
       - paddledoc_netbridge
 
   backend:
+    # No extra kernel privileges, no privilege escalation inside the
+    # container -- mirrors the Helm chart containerSecurityContext.
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
     image: ghcr.io/bl0rb/paddledoc-backend:${PADDLEDOC_TAG:-latest}
     restart: always
     container_name: paddledoc_backend
@@ -38,8 +56,8 @@ services:
       POSTGRES_PORT: ${POSTGRES_PORT:-5432}
       POSTGRES_DB: ${POSTGRES_DB:-paddledoc}
       POSTGRES_USER: ${POSTGRES_USER:-paddledoc}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-change-me}
-      REDIS_URL: redis://:${REDIS_PASSWORD:-paddledoc-dev-redis-password}@redis:6379/0
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required (run scripts/init-env.sh or set it in .env)}
+      REDIS_URL: redis://:${REDIS_PASSWORD:?REDIS_PASSWORD is required (run scripts/init-env.sh or set it in .env)}@redis:6379/0
       # Concrete origin, not "*": the app sends credentialed CORS responses
       # (session cookies), so a wildcard would reflect any origin back with
       # Access-Control-Allow-Credentials. Set CORS_ORIGINS to your NAS
@@ -49,7 +67,7 @@ services:
       # OIDC provider client secrets are encrypted with. The app itself
       # refuses to start without one against this postgres-backed compose
       # setup -- override in a .env file for anything beyond local/NAS dev.
-      SECRET_KEY: ${SECRET_KEY:-paddledoc-dev-insecure-secret-key-change-me}
+      SECRET_KEY: ${SECRET_KEY:?SECRET_KEY is required (run scripts/init-env.sh or set it in .env) — it encrypts every stored OIDC/import/VL credential}
       # Base URL the backend is reachable at; used to build the OIDC
       # redirect_uri (`{PUBLIC_API_URL}/api/v1/auth/oidc/{slug}/callback`).
       PUBLIC_API_URL: ${PUBLIC_API_URL:-http://localhost:8000}
@@ -82,6 +100,12 @@ services:
       - paddledoc_netbridge
 
   worker:
+    # No extra kernel privileges, no privilege escalation inside the
+    # container -- mirrors the Helm chart containerSecurityContext.
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
     image: ghcr.io/bl0rb/paddledoc-worker:${PADDLEDOC_TAG:-latest}
     restart: always
     container_name: paddledoc_worker
@@ -92,13 +116,13 @@ services:
       POSTGRES_PORT: ${POSTGRES_PORT:-5432}
       POSTGRES_DB: ${POSTGRES_DB:-paddledoc}
       POSTGRES_USER: ${POSTGRES_USER:-paddledoc}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-change-me}
-      REDIS_URL: redis://:${REDIS_PASSWORD:-paddledoc-dev-redis-password}@redis:6379/0
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required (run scripts/init-env.sh or set it in .env)}
+      REDIS_URL: redis://:${REDIS_PASSWORD:?REDIS_PASSWORD is required (run scripts/init-env.sh or set it in .env)}@redis:6379/0
       # The worker imports app/core/config.py (directly, and via
       # alembic/env.py if it ever runs migrations) same as the backend, which
       # fails fast at import time if SECRET_KEY is unset for a non-sqlite
       # database -- set here for parity, same default as the backend's.
-      SECRET_KEY: ${SECRET_KEY:-paddledoc-dev-insecure-secret-key-change-me}
+      SECRET_KEY: ${SECRET_KEY:?SECRET_KEY is required (run scripts/init-env.sh or set it in .env) — it encrypts every stored OIDC/import/VL credential}
       PADDLE_DEFAULT_PROFILE: ${PADDLE_DEFAULT_PROFILE:-ppocrv6_tiny}
       CELERY_WORKER_CONCURRENCY: ${CELERY_WORKER_CONCURRENCY:-1}
       CELERY_PREFETCH_MULTIPLIER: ${CELERY_PREFETCH_MULTIPLIER:-1}
@@ -126,7 +150,10 @@ services:
       IMPORT_ATTACHMENT_MAX_BYTES: ${IMPORT_ATTACHMENT_MAX_BYTES:-20971520}
     volumes:
       - ./nas-data/storage:/app/backend/storage:rw
-      - ./nas-data/paddlex_models:/root/.paddlex:rw
+      # See docker-compose.yml: container home is /home/paddledoc.
+      # The host directory must belong to UID/GID 1000 -- on an existing
+      # installation run: sudo chown -R 1000:1000 ./nas-data
+      - ./nas-data/paddlex_models:/home/paddledoc:rw
     depends_on:
       backend:
         condition: service_healthy
@@ -136,6 +163,12 @@ services:
       - paddledoc_netbridge
 
   frontend:
+    # No extra kernel privileges, no privilege escalation inside the
+    # container -- mirrors the Helm chart containerSecurityContext.
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
     image: ghcr.io/bl0rb/paddledoc-frontend:${PADDLEDOC_TAG:-latest}
     restart: always
     container_name: paddledoc_frontend

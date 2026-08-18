@@ -1,5 +1,25 @@
 # <img src="docs/logo.svg" width="30" alt="" align="top"> PaddleDoc
 
+[![PR CI](https://img.shields.io/github/actions/workflow/status/bl0rb/PaddleDoc/pr-ci.yml?branch=main&label=PR%20CI&logo=githubactions&logoColor=white&style=flat-square)](https://github.com/bl0rb/PaddleDoc/actions/workflows/pr-ci.yml)
+[![Release](https://img.shields.io/github/v/release/bl0rb/PaddleDoc?label=Release&logo=github&color=234C77&style=flat-square)](https://github.com/bl0rb/PaddleDoc/releases/latest)
+[![License](https://img.shields.io/badge/License-MIT-6C7686?style=flat-square)](LICENSE)
+
+[![Python](https://img.shields.io/badge/Python-3.13-3776AB?logo=python&logoColor=white&style=flat-square)](backend/Dockerfile)
+[![FastAPI](https://img.shields.io/badge/FastAPI-0.141-009688?logo=fastapi&logoColor=white&style=flat-square)](backend/requirements.in)
+[![Celery](https://img.shields.io/badge/Celery-5.6-37814A?logo=celery&logoColor=white&style=flat-square)](backend/worker.Dockerfile)
+[![Next.js](https://img.shields.io/badge/Next.js-16-000000?logo=nextdotjs&logoColor=white&style=flat-square)](frontend/package.json)
+[![PostgreSQL](https://img.shields.io/badge/PostgreSQL-16-4169E1?logo=postgresql&logoColor=white&style=flat-square)](docker-compose.nas.yml)
+[![Redis](https://img.shields.io/badge/Redis-7-FF4438?logo=redis&logoColor=white&style=flat-square)](docker-compose.nas.yml)
+[![Docker](https://img.shields.io/badge/Docker-compose%20%C2%B7%20NAS-2496ED?logo=docker&logoColor=white&style=flat-square)](docker-compose.nas.yml)
+[![Kubernetes](https://img.shields.io/badge/Kubernetes-Helm%20chart-326CE5?logo=kubernetes&logoColor=white&style=flat-square)](charts/paddledoc)
+
+[![pip-audit](https://img.shields.io/badge/pip--audit-0%20findings-216B52?logo=python&logoColor=white&style=flat-square)](.github/workflows/pr-ci.yml)
+[![npm audit](https://img.shields.io/badge/npm%20audit-0%20findings-216B52?logo=npm&logoColor=white&style=flat-square)](.github/workflows/pr-ci.yml)
+[![Audit](https://img.shields.io/badge/Security%20audit-Claude%20Opus%205-D97757?logo=anthropic&logoColor=white&style=flat-square)](#security)
+[![Containers](https://img.shields.io/badge/Containers-non--root%20uid%201000-0DB7ED?logo=docker&logoColor=white&style=flat-square)](backend/Dockerfile)
+[![Dependencies](https://img.shields.io/badge/Dependencies-hash--locked-8A5A07?style=flat-square)](backend/requirements.txt)
+[![Tests](https://img.shields.io/badge/Tests-417%20backend-3F6382?logo=pytest&logoColor=white&style=flat-square)](backend/tests)
+
 PaddleDoc is a document processing platform powered by PaddleOCR that converts PDFs, Office files, Mails and images into structured Markdown for RAG and AI pipelines.
 
 It is built for teams that need reliable ingestion quality, searchable outputs, and simple deployment options from standalone NAS Docker to Kubernetes.
@@ -27,8 +47,8 @@ Choose your deployment mode:
 
 | Mode | Best for | Command |
 |---|---|---|
-| Standalone Docker | Local server or NAS (UGREEN/QNAP/Synology) | `docker compose -f docker-compose.nas.yml up -d` |
-| Docker (Dev/Single Host) | Local development with local builds | `docker compose up --build` |
+| Standalone Docker | Local server or NAS (UGREEN/QNAP/Synology) | `./scripts/init-env.sh && docker compose -f docker-compose.nas.yml up -d` |
+| Docker (Dev/Single Host) | Local development with local builds | `./scripts/init-env.sh && docker compose up --build` |
 | Docker + NVIDIA GPU | Windows Docker Desktop with GPU-enabled worker profile | `docker compose -f docker-compose.yml -f docker-compose.gpu.yml up -d --build` |
 | Kubernetes (Helm) | k3s/k8s clusters and scale-out deployments | `helm upgrade --install paddledoc ./charts/paddledoc -n paddledoc --create-namespace --set auth.secretKey.value=$(openssl rand -hex 32)` |
 
@@ -37,10 +57,17 @@ Choose your deployment mode:
 Use prebuilt GHCR images and persistent local folders.
 
 ```bash
+# Generates SECRET_KEY, POSTGRES_PASSWORD and REDIS_PASSWORD into .env.
+# The compose files have no fallback values for these on purpose — a default
+# that ships in the repository is a published secret, and SECRET_KEY is the
+# key every stored OIDC client secret, Confluence credential and VL API key
+# is encrypted under. Compose refuses to start until they are set.
+./scripts/init-env.sh
+
 docker compose -f docker-compose.nas.yml up -d
 ```
 
-Before first production run, set strong credentials/environment values (e.g. in a `.env` file next to the compose file — see `.env.example`):
+Further environment values go into the same `.env` next to the compose file — see `.env.example`:
 
 ```bash
 POSTGRES_USER=paddledoc
@@ -164,6 +191,14 @@ Create personal API tokens for programmatic access. Tokens are shown exactly onc
 
 Admins manage users (roles, teams, activation, password resets, assigning legacy ownerless jobs), teams, and OIDC identity providers — including a per-provider connection test.
 
+**Registering an OIDC provider (Keycloak, Microsoft Entra ID, ...):** add it under **Admin → Identity Providers** with the issuer URL, client ID/secret and scopes from your IdP. In the IdP's app registration, set the redirect URI / callback URL to:
+
+```
+{PUBLIC_API_URL}/api/v1/auth/oidc/{slug}/callback
+```
+
+`{slug}` is the URL-safe identifier you choose in the "Slug" field (e.g. `entra`), and `{PUBLIC_API_URL}` is the backend's externally reachable base URL (`PUBLIC_API_URL` above / `auth.publicApiUrl` in the Helm chart). Example for slug `entra`: `https://paddledoc.example.com/api/v1/auth/oidc/entra/callback`.
+
 ![VL connections](docs/screenshots/admin-vl-connections.png)
 
 **VL connections** hold OpenAI-compatible vision endpoints for the benchmark: base URL, model, API key (encrypted at rest, never displayed again), and a per-connection system prompt — with a test button that reports latency. Internal endpoints (vLLM, LiteLLM, Ollama) are first-class citizens.
@@ -264,6 +299,28 @@ n8n URL choice:
 
 ## Deployment and Runtime Notes
 
+### Upgrading an existing installation
+
+Two changes in this release need a one-time step on hosts that were set up earlier:
+
+1. **The containers no longer run as root** (UID/GID 1000 now, matching what the Helm chart already enforced). Bind-mounted directories still belong to root, so hand them over before starting:
+
+   ```bash
+   docker compose -f docker-compose.nas.yml down
+   sudo chown -R 1000:1000 ./nas-data
+   docker compose -f docker-compose.nas.yml up -d
+   ```
+
+   The PaddleOCR model cache moved from `/root/.paddlex` to `/home/paddledoc` inside the container; the updated compose file mounts the new path already. Kubernetes deployments are unaffected — the chart set `runAsUser: 1000` all along.
+
+2. **The compose files no longer carry fallback secrets.** If you never overrode `SECRET_KEY`, `POSTGRES_PASSWORD` or `REDIS_PASSWORD`, the stack was running with the values from this repository. Compose now refuses to start without them:
+
+   ```bash
+   ./scripts/init-env.sh   # fills in only the keys that are missing
+   ```
+
+   Careful with `SECRET_KEY`: keep the old value if you have stored OIDC client secrets, Confluence credentials or VL API keys — they are encrypted under a key derived from it and cannot be read with a new one. If it was the repository default, treat those credentials as compromised, generate a fresh key and re-enter them.
+
 Firewall rules for restricted networks: see
 [docs/firewall-requirements.md](docs/firewall-requirements.md) for the full
 inbound/outbound connection matrix per component.
@@ -339,6 +396,31 @@ Apply env changes without rebuilding images:
 ```bash
 docker compose up -d --no-deps backend worker
 ```
+
+## Security
+
+PaddleDoc is built to run inside your own network. What is wired in by default:
+
+| Area | Implementation |
+| --- | --- |
+| Sessions | Opaque database-backed tokens (not JWTs), stored as SHA-256, `HttpOnly` · `Secure` · `SameSite=Lax`, sliding 7 days with a hard 30-day cap, revoked instantly on logout or deactivation |
+| Login | bcrypt, one constant-time verification on every path (no username enumeration), one generic error for every failure mode, plus a per-account lockout after 10 failed attempts |
+| API tokens | `Authorization: Bearer`, stored as SHA-256, optional expiry, never mixed up with a browser session |
+| Outbound requests | Every admin-supplied URL (OIDC discovery, Confluence import, VL endpoints) goes through `safe_fetch`: connection pinned to the validated IP (no DNS rebinding), every redirect hop re-checked, credentials dropped on origin change, cloud-metadata addresses blocked unconditionally |
+| Secrets at rest | OIDC client secrets, import credentials and VL API keys under three HKDF-separated Fernet keys derived from `SECRET_KEY` |
+| Rows | Jobs, collections and mail scoped by owner and team; ownerless legacy rows are admin-only |
+| HTTP | CSP, `X-Frame-Options`, `nosniff`, `Referrer-Policy`, `Permissions-Policy`, HSTS over TLS; CSRF checked via `Origin`/`Referer` on every state-changing request |
+| Containers | All three images run as UID/GID 1000, `no-new-privileges` and `cap_drop: ALL` in compose, matching `securityContext` in the Helm chart |
+| Supply chain | Actions pinned to commit SHAs, backend and worker dependencies hash-locked, `pip-audit` and `npm audit` run on every PR |
+
+**Reviewed by:** the codebase was put through a security audit by **Claude Opus 5** (authentication and authorization, injection, SSRF, secret handling, containers, CI and supply chain). All findings are fixed; the fixes are covered by the test suite.
+
+**Two things worth knowing when you deploy:**
+
+- `SECRET_KEY` is what makes the stored third-party credentials readable. Set it once via `scripts/init-env.sh` (or your secret manager) and keep it — rotating it invalidates every stored OIDC client secret, import credential and VL API key, and they have to be entered again.
+- Self-hosted VL endpoints (vLLM, Ollama, LiteLLM) live on private addresses, which `safe_fetch` blocks by default. List them in `VL_PRIVATE_HOST_ALLOWLIST` (`["vl.internal:8000"]`), the same way `IMPORT_PRIVATE_HOST_ALLOWLIST` works for an internal Confluence. Cloud-metadata addresses stay blocked either way.
+
+To report a vulnerability, please open a GitHub Security Advisory rather than a public issue.
 
 ## Publishing to GHCR
 

@@ -9,6 +9,9 @@ venv/
 backend/.venv/
 test.db
 backend/test.db
+# Running pytest from inside backend/ resolves the relative UPLOADS_DIR/
+# RESULTS_DIR against that directory, so test runs leave a nested copy.
+backend/backend/
 backend/storage/uploads/*
 backend/storage/results/*
 frontend/node_modules/

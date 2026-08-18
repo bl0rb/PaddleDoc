@@ -21,8 +21,10 @@ RUN apt-get update \
 		libgl1 \
 	&& rm -rf /var/lib/apt/lists/*
 
+# --require-hashes rejects any artifact whose digest is not in the lock;
+# regenerate the lock via the command documented in requirements.in.
 COPY requirements.txt /app/requirements.txt
-RUN pip install --no-cache-dir -r /app/requirements.txt
+RUN pip install --no-cache-dir --require-hashes -r /app/requirements.txt
 
 # PaddlePaddle install is architecture-specific:
 # - amd64: use CUDA-enabled wheel for GPU deployments.
@@ -46,5 +48,22 @@ COPY requirements-worker.txt /app/requirements-worker.txt
 RUN pip install --no-cache-dir --require-hashes -r /app/requirements-worker.txt
 
 COPY app /app/app
+
+# Non-root runtime user. UID/GID 1000 and the home directory match the Helm
+# chart (podSecurityContext runAsUser/runAsGroup 1000, HOME=/home/paddledoc),
+# so the image behaves identically under compose and under Kubernetes instead
+# of running as root in the one and as 1000 in the other.
+RUN groupadd --gid 1000 paddledoc \
+	&& useradd --uid 1000 --gid 1000 --home-dir /home/paddledoc --create-home paddledoc \
+	&& mkdir -p /app/backend/storage \
+	&& chown -R paddledoc:paddledoc /app /home/paddledoc
+
+USER paddledoc
+
+# PaddleOCR downloads model weights at runtime into $HOME/.paddlex and
+# $HOME/.paddleocr. Docker does not read the home directory from /etc/passwd,
+# so HOME must be set explicitly or it would default to "/" (not writable for
+# this user) and every model download would fail.
+ENV HOME=/home/paddledoc
 
 CMD ["sh", "-c", "celery -A app.workers.tasks worker --loglevel=${CELERY_LOG_LEVEL:-info} --pool=${CELERY_WORKER_POOL:-prefork} --concurrency=${CELERY_WORKER_CONCURRENCY:-1} --prefetch-multiplier=${CELERY_PREFETCH_MULTIPLIER:-1} -Ofair --max-tasks-per-child=${CELERY_MAX_TASKS_PER_CHILD:-5}"]

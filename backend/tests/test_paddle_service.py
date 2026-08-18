@@ -1,7 +1,6 @@
 import io
 import sys
 import types
-import urllib.error
 from pathlib import Path
 
 import pytest
@@ -441,10 +440,14 @@ def test_call_vision_chat_api_unreachable_omits_api_base_uses_connection_label(m
     the operator-facing identifier, the URL lives in the VL connections tab."""
     secret_host = 'https://vl-internal.example.corp:9443'
 
-    def fake_urlopen(req, timeout=None):
-        raise urllib.error.URLError('connection refused')
-
-    monkeypatch.setattr('urllib.request.urlopen', fake_urlopen)
+    # SafeFetchError messages embed the URL that was being fetched -- exactly
+    # what must not escape into the raised message or the log stream.
+    _fake_safe_fetch(
+        monkeypatch,
+        raises=paddle_service.safe_fetch_module.SafeFetchError(
+            f'connection refused fetching {secret_host!r}'
+        ),
+    )
 
     with caplog.at_level('WARNING'):
         with pytest.raises(RuntimeError) as exc_info:
@@ -459,7 +462,7 @@ def test_call_vision_chat_api_unreachable_omits_api_base_uses_connection_label(m
             )
 
     message = str(exc_info.value)
-    assert message == 'VL endpoint "Prod VL Connection" unreachable: connection refused'
+    assert message == 'VL endpoint "Prod VL Connection" unreachable'
     assert secret_host not in message
 
     # The URL stays out of the log stream as well; the label identifies the connection.
@@ -470,10 +473,7 @@ def test_call_vision_chat_api_unreachable_omits_api_base_uses_connection_label(m
 def test_call_vision_chat_api_http_error_omits_api_base_uses_connection_label(monkeypatch, caplog):
     secret_host = 'https://vl-internal.example.corp:9443'
 
-    def fake_urlopen(req, timeout=None):
-        raise urllib.error.HTTPError(req.full_url, 500, 'Server Error', hdrs=None, fp=io.BytesIO(b'boom'))
-
-    monkeypatch.setattr('urllib.request.urlopen', fake_urlopen)
+    _fake_safe_fetch(monkeypatch, status=500, body=b'boom')
 
     with caplog.at_level('WARNING'):
         with pytest.raises(RuntimeError) as exc_info:
@@ -506,10 +506,12 @@ def test_openai_vision_to_structure_propagates_connection_label_not_base_url(mon
 
     secret_host = 'https://vl-internal.example.corp:9443'
 
-    def fake_urlopen(req, timeout=None):
-        raise urllib.error.URLError('connection refused')
-
-    monkeypatch.setattr('urllib.request.urlopen', fake_urlopen)
+    # Stub safe_fetch rather than relying on the host failing to resolve --
+    # otherwise this asserts nothing on a network where it does.
+    _fake_safe_fetch(
+        monkeypatch,
+        raises=paddle_service.safe_fetch_module.SafeFetchError(f'connection refused fetching {secret_host!r}'),
+    )
 
     override = {
         'base_url': secret_host,
@@ -600,27 +602,37 @@ def test_convert_to_markdown_ignores_vl_override_for_non_vl_profile(monkeypatch,
 
 
 # --- FEATURE: VL connection admin /test probe (test_vl_connection) ------------
+#
+# The VL calls go through app.services.safe_fetch (SSRF protection, DNS-pinning,
+# per-hop redirect checks), so these tests stub safe_fetch rather than urlopen.
+
+def _fake_safe_fetch(monkeypatch, *, status=200, body=b'{"choices": []}', captured=None, raises=None):
+    """Replace safe_fetch with a stub; record what it was called with."""
+    def fake(url, *, method='GET', headers=None, body=None, timeout=5.0, max_redirects=5,
+             max_bytes=2 * 1024 * 1024, allowed_private_hosts=None):
+        if captured is not None:
+            captured['url'] = url
+            captured['method'] = method
+            captured['timeout'] = timeout
+            captured['auth'] = (headers or {}).get('Authorization')
+            captured['allowed_private_hosts'] = allowed_private_hosts
+        if raises is not None:
+            raise raises
+        return paddle_service.safe_fetch_module.SafeFetchResponse(
+            status_code=status, headers={}, body=_fake_body, final_url=url
+        )
+    global _fake_body
+    _fake_body = body
+    monkeypatch.setattr(paddle_service.safe_fetch_module, 'safe_fetch', fake)
+
+
+_fake_body = b''
+
 
 def test_test_vl_connection_success(monkeypatch):
     captured = {}
 
-    class FakeResponse:
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *args):
-            return False
-
-        def read(self):
-            return b'{"choices": []}'
-
-    def fake_urlopen(req, timeout=None):
-        captured['url'] = req.full_url
-        captured['timeout'] = timeout
-        captured['auth'] = req.headers.get('Authorization')
-        return FakeResponse()
-
-    monkeypatch.setattr('urllib.request.urlopen', fake_urlopen)
+    _fake_safe_fetch(monkeypatch, captured=captured)
 
     result = paddle_service.test_vl_connection(
         'https://vl.example.com/', 'model-x', 'key-x', 'custom prompt', timeout_seconds=5
@@ -634,28 +646,46 @@ def test_test_vl_connection_success(monkeypatch):
 
 
 def test_test_vl_connection_http_error(monkeypatch):
-    def fake_urlopen(req, timeout=None):
-        raise urllib.error.HTTPError(req.full_url, 401, 'Unauthorized', hdrs=None, fp=io.BytesIO(b'bad key'))
-
-    monkeypatch.setattr('urllib.request.urlopen', fake_urlopen)
+    _fake_safe_fetch(monkeypatch, status=401, body=b'bad key')
 
     result = paddle_service.test_vl_connection('https://vl.example.com', 'model-x', 'bad-key', '')
     assert result['ok'] is False
     assert 'HTTP 401' in result['detail']
-    assert 'bad key' in result['detail']
+    # The remote body must NOT be echoed back: this endpoint would otherwise
+    # be a convenient way to fingerprint internal services from the outside.
+    assert 'bad key' not in result['detail']
     assert isinstance(result['latency_ms'], int)
 
 
 def test_test_vl_connection_url_error(monkeypatch):
-    def fake_urlopen(req, timeout=None):
-        raise urllib.error.URLError('connection refused')
+    secret_host = 'https://unreachable.example.corp:9443'
+    _fake_safe_fetch(
+        monkeypatch,
+        raises=paddle_service.safe_fetch_module.SafeFetchError(f'blocked private address for {secret_host!r}'),
+    )
 
-    monkeypatch.setattr('urllib.request.urlopen', fake_urlopen)
-
-    result = paddle_service.test_vl_connection('https://unreachable.example.com', 'model-x', 'key', '')
+    result = paddle_service.test_vl_connection(secret_host, 'model-x', 'key', '')
     assert result['ok'] is False
-    assert 'Unreachable' in result['detail']
+    assert result['detail'] == 'Endpoint unreachable or not permitted'
+    assert secret_host not in result['detail']
     assert isinstance(result['latency_ms'], int)
+
+
+def test_test_vl_connection_uses_safe_fetch_with_private_allowlist(monkeypatch):
+    """The outbound probe must run through safe_fetch and hand it the
+    configured private-host allowlist -- that is what keeps DNS-rebinding
+    protection and the cloud-metadata block in force while still allowing a
+    self-hosted vLLM/Ollama endpoint on the internal network."""
+    captured = {}
+    monkeypatch.setattr(paddle_service.settings, 'vl_private_host_allowlist', ['vl.internal:8000'])
+    _fake_safe_fetch(monkeypatch, captured=captured)
+
+    paddle_service.test_vl_connection('http://vl.internal:8000', 'model-x', 'key-x', '', timeout_seconds=7)
+
+    assert captured['url'] == 'http://vl.internal:8000/v1/chat/completions'
+    assert captured['method'] == 'POST'
+    assert captured['timeout'] == 7
+    assert captured['allowed_private_hosts'] == frozenset({'vl.internal:8000'})
 
 
 # --- FEATURE: .eml (RFC-822 email) upload support ----------------------------

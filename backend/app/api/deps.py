@@ -6,6 +6,7 @@ auth endpoint module.
 """
 
 from datetime import datetime, timedelta, timezone
+from urllib.parse import urlsplit
 
 from fastapi import Depends, HTTPException, Request, status
 from sqlalchemy import select
@@ -45,6 +46,12 @@ def _aware_utc(value: datetime) -> datetime:
     if value.tzinfo is None:
         return value.replace(tzinfo=timezone.utc)
     return value
+
+
+# Public alias: app/api/auth.py needs the same naive->UTC normalisation for
+# the login-lockout timestamps (same convention as security.py's
+# is_trusted_proxy_peer).
+aware_utc = _aware_utc
 
 
 def _authenticate_api_token(db: Session, raw_token: str) -> User:
@@ -128,13 +135,32 @@ def require_admin(user: User = Depends(get_current_user)) -> User:
 
 def origin_guard(request: Request) -> None:
     """CSRF defense-in-depth on top of SameSite=Lax: reject any
-    state-changing request that carries an Origin header not in our
-    configured frontend list. Applied to the PUBLIC auth POSTs too
+    state-changing request whose Origin (or, absent that, Referer) is not in
+    our configured frontend list. Applied to the PUBLIC auth POSTs too
     (login/setup/OIDC) -- not just authenticated routes -- since those are
     exactly what a cross-site form/fetch would try to forge.
+
+    When NEITHER header is present the decision hangs on the session cookie:
+    browsers always send Origin on a cross-origin POST, so a cookie-carrying
+    request without one did not come from a page of ours and is rejected. A
+    bearer-token client (script, integration) sends no cookie and is
+    unaffected -- it could not be a CSRF victim in the first place.
     """
     if request.method not in _STATE_CHANGING_METHODS:
         return
+
     origin = request.headers.get('origin')
-    if origin and origin not in settings.cors_origins:
+    if origin:
+        if origin not in settings.cors_origins:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail='Origin not allowed')
+        return
+
+    referer = request.headers.get('referer')
+    if referer:
+        referer_origin = urlsplit(referer)
+        if f'{referer_origin.scheme}://{referer_origin.netloc}' not in settings.cors_origins:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail='Origin not allowed')
+        return
+
+    if request.cookies.get(SESSION_COOKIE_NAME):
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail='Origin not allowed')

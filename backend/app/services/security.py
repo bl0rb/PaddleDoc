@@ -163,6 +163,15 @@ def hash_password(password: str) -> str:
     return bcrypt.hashpw(password_bytes, bcrypt.gensalt()).decode('utf-8')
 
 
+# A fixed, valid bcrypt digest of a random string nobody knows. Verifying
+# against it costs the same as verifying a real hash, which is the point:
+# callers use it on the "no such account / no password set" branch so the
+# response time cannot be used to tell the two cases apart. Lives here rather
+# than in an endpoint module so both the login (app/api/auth.py) and the
+# job-password check (app/api/routes.py) can share the one constant.
+DUMMY_PASSWORD_HASH = '$2b$12$0dWbhp.Mm4hFrTNrFotMn.2lgDSumJrdRHfgOSWOjj6f/8zo3Wlsu'
+
+
 def verify_password(password: str, password_hash: str) -> bool:
     """Verify a password against its hash."""
     # See hash_password: truncate to bcrypt's 72-byte limit so long

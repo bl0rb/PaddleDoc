@@ -336,3 +336,67 @@ def test_rate_limiter_reset_clears_counters() -> None:
     rate_limiter.reset()
 
     rate_limiter.check(client_id)  # must not raise -- counter was cleared
+
+
+# --- Upload MIME validation ---------------------------------------------------
+#
+# The extension is the real gate (_safe_suffix); _validate_mime only catches a
+# declared type that contradicts it. These pin down where that line sits.
+
+class _FakeUpload:
+    def __init__(self, filename: str, content_type: str | None) -> None:
+        self.filename = filename
+        self.content_type = content_type
+
+
+@pytest.mark.parametrize('content_type', [
+    'application/pdf',          # exact match
+    'application/octet-stream',  # curl / drag-and-drop / sync clients
+    'binary/octet-stream',
+    '',
+    None,
+])
+def test_validate_mime_accepts_matching_and_generic_types(content_type) -> None:
+    from app.services.storage import _validate_mime
+    _validate_mime(_FakeUpload('report.pdf', content_type), '.pdf')
+
+
+def test_validate_mime_accepts_same_toplevel_category() -> None:
+    """image/jpg instead of image/jpeg is a client quirk, not a contradiction."""
+    from app.services.storage import _validate_mime
+    _validate_mime(_FakeUpload('scan.jpg', 'image/jpg'), '.jpg')
+
+
+def test_validate_mime_rejects_contradicting_type() -> None:
+    from app.services.storage import _validate_mime
+    with pytest.raises(HTTPException) as exc_info:
+        _validate_mime(_FakeUpload('report.pdf', 'image/png'), '.pdf')
+    assert exc_info.value.status_code == 400
+
+
+# --- Job password check -------------------------------------------------------
+
+def test_job_password_check_does_not_reveal_whether_a_job_is_protected() -> None:
+    """Same discipline as the login: one message for every failure mode, and a
+    bcrypt verification on both branches so the timing matches too."""
+    from app.api.routes import _check_job_password
+
+    class _Job:
+        def __init__(self, password_hash):
+            self.password_hash = password_hash
+
+    # Unprotected job: any password (or none) passes.
+    _check_job_password(_Job(None), None)
+    _check_job_password(_Job(None), 'whatever')
+
+    protected = _Job(hash_password('correct horse'))
+    _check_job_password(protected, 'correct horse')
+
+    messages = set()
+    for attempt in (None, '', 'wrong'):
+        with pytest.raises(HTTPException) as exc_info:
+            _check_job_password(protected, attempt)
+        assert exc_info.value.status_code == 401
+        messages.add(exc_info.value.detail)
+
+    assert messages == {'Invalid password'}

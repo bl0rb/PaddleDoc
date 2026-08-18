@@ -7,8 +7,6 @@ import logging
 import platform
 import re
 import time
-import urllib.error
-import urllib.request
 from io import BytesIO
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -20,6 +18,7 @@ from redis import Redis
 import yaml
 
 from app.core.config import settings
+from app.services import safe_fetch as safe_fetch_module
 from app.services.quality_gate import evaluate_document_quality
 from app.services.mail_ingest import (
     _parse_bytes as _parse_eml_bytes,
@@ -602,32 +601,33 @@ def _call_vision_chat_api(
         ],
         'max_tokens': 4096,
     }
-    data = _json.dumps(payload).encode()
-    req = urllib.request.Request(
-        f'{api_base}/v1/chat/completions',
-        data=data,
-        method='POST',
-        headers={
-            'Content-Type': 'application/json',
-            'Authorization': f'Bearer {bearer_token}',
-        },
-    )
     try:
-        with urllib.request.urlopen(req, timeout=120) as resp:  # noqa: S310
-            body = _json.loads(resp.read().decode())
-    except urllib.error.HTTPError as exc:
-        error_body = exc.read().decode(errors='replace')
+        response = _vl_chat_completion(api_base, bearer_token, payload, timeout=120)
+    except safe_fetch_module.SafeFetchError as exc:
+        # SafeFetchError embeds the URL it was fetching, and api_base may be an
+        # internal/VPC-only host that must not reach job.error_message or the
+        # log stream (see the api_base note in this function's docstring). The
+        # detail goes to the chained exception; the message stays label-only.
+        logger.warning('VL endpoint "%s" unreachable', connection_label)
+        raise RuntimeError(f'VL endpoint "{connection_label}" unreachable') from exc
+
+    if response.status_code >= 400:
+        error_body = response.body.decode(errors='replace')
         logger.warning(
             'VL endpoint "%s" returned HTTP %s for page %s: %s',
-            connection_label, exc.code, page_num, error_body[:400],
+            connection_label, response.status_code, page_num, error_body[:400],
         )
         raise RuntimeError(
-            f'VL endpoint "{connection_label}" returned HTTP {exc.code} for page {page_num}: {error_body[:400]}'
-        ) from exc
-    except urllib.error.URLError as exc:
-        logger.warning('VL endpoint "%s" unreachable: %s', connection_label, exc.reason)
+            f'VL endpoint "{connection_label}" returned HTTP {response.status_code} '
+            f'for page {page_num}: {error_body[:400]}'
+        )
+
+    try:
+        body = _json.loads(response.body.decode())
+    except ValueError as exc:
+        logger.warning('VL endpoint "%s" returned invalid JSON for page %s', connection_label, page_num)
         raise RuntimeError(
-            f'VL endpoint "{connection_label}" unreachable: {exc.reason}'
+            f'VL endpoint "{connection_label}" returned invalid JSON for page {page_num}'
         ) from exc
 
     choices = body.get('choices') or []
@@ -636,6 +636,42 @@ def _call_vision_chat_api(
         raise RuntimeError(f'VL endpoint "{connection_label}" returned no choices for page {page_num}')
     content = (choices[0].get('message') or {}).get('content') or ''
     return content.strip()
+
+
+# Cap on a VL response body. A page of extracted Markdown is far smaller;
+# this only stops a hostile/broken endpoint from streaming unbounded data
+# into the worker.
+_VL_MAX_RESPONSE_BYTES = 8 * 1024 * 1024
+
+
+def _vl_chat_completion(
+    api_base: str,
+    bearer_token: str,
+    payload: dict,
+    timeout: float,
+) -> 'safe_fetch_module.SafeFetchResponse':
+    """POST a chat-completion request to a VL endpoint through safe_fetch.
+
+    Routed through safe_fetch rather than urlopen so these outbound calls get
+    the same treatment as every other admin-supplied URL in this codebase:
+    the connection is pinned to the validated IP (no DNS rebinding), every
+    redirect hop is re-checked, the Authorization header is dropped if a hop
+    leaves the original origin, and cloud-metadata addresses stay blocked no
+    matter what. Self-hosted endpoints on private networks -- the normal case
+    here -- are permitted via VL_PRIVATE_HOST_ALLOWLIST.
+    """
+    return safe_fetch_module.safe_fetch(
+        f'{api_base}/v1/chat/completions',
+        method='POST',
+        headers={
+            'Content-Type': 'application/json',
+            'Authorization': f'Bearer {bearer_token}',
+        },
+        body=_json.dumps(payload).encode(),
+        timeout=timeout,
+        max_bytes=_VL_MAX_RESPONSE_BYTES,
+        allowed_private_hosts=frozenset(settings.vl_private_host_allowlist),
+    )
 
 
 def _page_to_base64_png(pdf_path: Path, page_index: int) -> str:
@@ -782,11 +818,15 @@ def test_vl_connection(
     cost/latency of a real page render. Used by
     POST /api/v1/auth/admin/vl-connections/{id}/test.
 
-    Deliberately does NOT use app.services.safe_fetch (no SSRF host
-    blocking): admin-entered VL connection endpoints are expected to be
-    internal/private (self-hosted vLLM/Ollama/etc.), which safe_fetch's
-    private-IP blocking would otherwise make untestable. Same
-    HTTPError/URLError handling/truncation style as `_call_vision_chat_api`.
+    Goes through safe_fetch like every other outbound call to an
+    admin-supplied URL; private endpoints (self-hosted vLLM/Ollama/etc.) are
+    permitted via VL_PRIVATE_HOST_ALLOWLIST, while DNS-rebinding protection,
+    per-hop redirect checks and the unconditional cloud-metadata block stay
+    in force.
+
+    The result deliberately reports only status and latency, never the remote
+    response body: echoing it back would turn this endpoint into a probe for
+    mapping internal services from the outside.
     """
     normalized_base = (base_url or '').rstrip('/')
     payload = {
@@ -797,32 +837,31 @@ def test_vl_connection(
         ],
         'max_tokens': 16,
     }
-    data = _json.dumps(payload).encode()
-    req = urllib.request.Request(
-        f'{normalized_base}/v1/chat/completions',
-        data=data,
-        method='POST',
-        headers={
-            'Content-Type': 'application/json',
-            'Authorization': f'Bearer {api_key}',
-        },
-    )
     started = time.monotonic()
     try:
-        with urllib.request.urlopen(req, timeout=timeout_seconds) as resp:  # noqa: S310
-            resp.read()
-    except urllib.error.HTTPError as exc:
+        response = _vl_chat_completion(normalized_base, api_key, payload, timeout=timeout_seconds)
+    except safe_fetch_module.SafeFetchError as exc:
+        # Covers unreachable hosts, blocked/private targets and size caps.
         latency_ms = int((time.monotonic() - started) * 1000)
-        error_body = exc.read().decode(errors='replace')
-        return {'ok': False, 'detail': f'HTTP {exc.code}: {error_body[:400]}', 'latency_ms': latency_ms}
-    except urllib.error.URLError as exc:
-        latency_ms = int((time.monotonic() - started) * 1000)
-        return {'ok': False, 'detail': f'Unreachable ({normalized_base}): {exc.reason}', 'latency_ms': latency_ms}
+        # Same reasoning as _call_vision_chat_api: the URL stays out of the
+        # log stream, which the admin Logs tab renders.
+        logger.warning('VL connection test failed: endpoint unreachable or not permitted')
+        return {'ok': False, 'detail': 'Endpoint unreachable or not permitted', 'latency_ms': latency_ms}
     except Exception as exc:  # pragma: no cover - defensive catch-all
         latency_ms = int((time.monotonic() - started) * 1000)
-        return {'ok': False, 'detail': str(exc), 'latency_ms': latency_ms}
+        logger.warning('VL connection test raised %s', type(exc).__name__)
+        return {'ok': False, 'detail': 'Connection test failed', 'latency_ms': latency_ms}
 
     latency_ms = int((time.monotonic() - started) * 1000)
+
+    if response.status_code >= 400:
+        # Body intentionally logged, not returned -- see the docstring.
+        logger.warning(
+            'VL connection test returned HTTP %s: %s',
+            response.status_code, response.body.decode(errors='replace')[:400],
+        )
+        return {'ok': False, 'detail': f'HTTP {response.status_code}', 'latency_ms': latency_ms}
+
     return {'ok': True, 'detail': 'Connected', 'latency_ms': latency_ms}
 
 

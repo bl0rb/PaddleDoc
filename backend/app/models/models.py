@@ -272,6 +272,13 @@ class User(Base):
     email: Mapped[str] = mapped_column(String(320), nullable=False)
     # NULL => OIDC-only account (no local password login possible).
     password_hash: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    # Per-account login throttling (see app/api/auth.py:login). Kept in the
+    # database rather than in Redis so the brake still works -- and still
+    # refuses -- while Redis is down, which is exactly when the general
+    # rate limiter fails open.
+    failed_login_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False, server_default='0')
+    last_failed_login_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    locked_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     # native_enum=False: plain VARCHAR + CHECK constraint on every dialect
     # (sqlite has no native enum type; this also sidesteps the manual
     # CREATE TYPE / DROP TYPE dance used for jobstatus in 0001_init).

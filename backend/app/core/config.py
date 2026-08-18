@@ -56,6 +56,14 @@ class Settings(BaseSettings):
     celery_broker_visibility_timeout_seconds: int = 1800
     openai_api_base_url: str = ''
     openai_api_bearer_token: str = ''
+    # Hostnames ('host' or 'host:port') of private-network VL endpoints
+    # (self-hosted vLLM/Ollama/LiteLLM) that outbound benchmark and test
+    # requests may reach. Same mechanism and parsing as
+    # import_private_host_allowlist: passed into safe_fetch as
+    # allowed_private_hosts and re-checked on every redirect hop, while
+    # cloud-metadata addresses stay blocked regardless. Empty (the default)
+    # means public endpoints only.
+    vl_private_host_allowlist: list[str] = []
 
     # Celery worker log capture into worker_log_entries (see
     # app/workers/log_capture.py) -- lets the admin UI tail worker container
