@@ -29,6 +29,7 @@ jobs:
 
       - name: Install frontend dependencies
         run: npm ci
+        working-directory: frontend
 
       # Fails the build on a known-vulnerable dependency instead of leaving it
       # to whoever happens to run `npm audit` by hand.
@@ -79,6 +80,11 @@ jobs:
     steps:
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # The compose files have no fallback secrets any more, so generate a
+      # throwaway set first. Doubles as a smoke test for the script itself.
+      - name: Generate throwaway secrets
+        run: ./scripts/init-env.sh
 
       - name: Validate docker-compose files
         run: |
