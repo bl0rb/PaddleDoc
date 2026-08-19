@@ -785,9 +785,9 @@ pygments==2.21.0 \
     --hash=sha256:2363c69b61c4a97c838da3b130dcd6468f4848992b21a82f2a63ec34377137d9 \
     --hash=sha256:610ca751c9bc2492b38eb9a38a7fbc93edbbb2d7182edaf34e66ae493dee5c8c
     # via pytest
-pypdf==6.15.0 \
-    --hash=sha256:14e001d6504822cb1ca9c7ed9a69bccb320f59b320730f55af804361abe4d5ee \
-    --hash=sha256:d39c4d955a76409284a905e2d65b40076d77ab76129e0faaeeb6612403ecfc79
+pypdf==6.16.1 \
+    --hash=sha256:63fec31c4092ae50b6729beedcb469055b60d20c834bde1c402df241f371f644 \
+    --hash=sha256:c4d1b43ddae921387321cf63936cd16a7743b91d2da92f165c149a195c972ba9
     # via -r requirements.in
 pytest==9.1.0 \
     --hash=sha256:41dd9148c08072446394cefd3d79701701335a9f4cae69ba92e39f6c7f5c061c \
