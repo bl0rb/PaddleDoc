@@ -1,0 +1,10 @@
+# Keep the build context small AND correct: the builder stage runs `COPY . .`
+# after taking node_modules from the deps stage (npm ci) — without this file,
+# host node_modules (~520 MB, possibly wrong-platform binaries) and a stale
+# host .next (~360 MB) would be streamed as context and copied over the
+# freshly installed/built versions inside the image.
+node_modules
+.next
+.git
+.env*.local
+npm-debug.log*

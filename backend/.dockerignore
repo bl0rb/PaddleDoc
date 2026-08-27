@@ -1,0 +1,14 @@
+# Keep the build context small: the Dockerfiles only COPY app/, alembic/,
+# alembic.ini, entrypoint.sh and the requirements files. Everything below is
+# host-local state that would otherwise be streamed to the docker daemon on
+# every build (~365 MB: .venv + storage alone).
+.venv
+storage
+tests
+test.db
+**/__pycache__
+**/*.pyc
+.pytest_cache
+.coverage
+htmlcov
+.git
