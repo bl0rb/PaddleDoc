@@ -10,6 +10,6 @@
 # internally consistent release into the lock (currently 3.7.0 — 3.7.x metadata
 # conflicts with paddlex on pyyaml, so strict resolvers may need backtracking).
 # Review major version bumps in the lock diff deliberately.
-onnxruntime==1.28.0
+onnxruntime==1.29.0
 pypdfium2==5.13.0
 paddleocr[doc-parser]
