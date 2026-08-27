@@ -52,7 +52,7 @@ Choose your deployment mode:
 |---|---|---|
 | Standalone Docker | Local server or NAS (UGREEN/QNAP/Synology) | `./scripts/init-env.sh && docker compose -f docker-compose.nas.yml up -d` |
 | Docker (Dev/Single Host) | Local development with local builds | `./scripts/init-env.sh && docker compose up --build` |
-| Docker + NVIDIA GPU | Windows Docker Desktop with GPU-enabled worker profile | `docker compose -f docker-compose.yml -f docker-compose.gpu.yml up -d --build` |
+| Docker + NVIDIA GPU | Windows Docker Desktop with GPU-enabled worker profile | `wsl bash scripts/init-env.sh; docker compose -f docker-compose.nas.yml -f docker-compose.gpu.yml up -d` |
 | Kubernetes (Helm) | k3s/k8s clusters and scale-out deployments | `helm upgrade --install paddledoc ./charts/paddledoc -n paddledoc --create-namespace --set auth.secretKey.value=$(openssl rand -hex 32)` |
 
 ### Standalone NAS (No Kubernetes)
@@ -351,23 +351,36 @@ Migrations run automatically on backend startup (Alembic, currently `0001` … `
 
 ### GPU Runtime (Windows + NVIDIA)
 
-Use the GPU override file:
+Recommended: prebuilt GHCR images plus the GPU override — no local build. The published `paddledoc-worker` image already contains `paddlepaddle-gpu` on amd64, and `docker-compose.gpu.yml` is a pure runtime overlay (NVIDIA device reservation, VL default profile, solo worker pool), so it stacks directly on the prebuilt-image compose file:
 
 ```powershell
-Copy-Item .env.example .env
+# generate SECRET_KEY / POSTGRES_PASSWORD / REDIS_PASSWORD into .env
+# (bash script: run via WSL as shown — needs an installed distro like Ubuntu —
+# or from Git Bash without the wsl prefix)
+wsl bash scripts/init-env.sh
+
+docker compose -f docker-compose.nas.yml -f docker-compose.gpu.yml up -d
+```
+
+The defaults target a desktop setup (`http://localhost:3000` / `http://localhost:8000`), so no further URL configuration is needed. Prerequisite: a current NVIDIA driver on the Windows host — Docker Desktop's WSL2 integration handles the CUDA passthrough itself.
+
+Building the images locally instead (only needed when you changed backend/worker/frontend code):
+
+```powershell
+wsl bash scripts/init-env.sh
 docker compose -f docker-compose.yml -f docker-compose.gpu.yml up -d --build
 ```
 
 Behavior summary:
 
-- Worker image includes `paddlepaddle-gpu`
+- Worker image includes `paddlepaddle-gpu` (amd64 — the published image; a locally built arm64 image ships the CPU wheel instead)
 - Runtime auto-detects CUDA and falls back to CPU
 - GPU override switches default profile to `paddlevl_1_6_0_9b`
 - Uses safer worker settings for CUDA stability (`solo`, concurrency `1`)
 
 ### Worker Scaling and Tuning
 
-Scale workers:
+Scale workers (local-build dev compose only — `docker-compose.nas.yml` pins `container_name: paddledoc_worker`, which cannot be scaled, and the GPU overlay's solo-pool settings assume a single worker):
 
 ```bash
 docker compose up --build -d --scale worker=2
@@ -403,7 +416,7 @@ OPENAI_API_BASE_URL=http://host.docker.internal:11434
 OPENAI_API_BEARER_TOKEN=ollama
 ```
 
-Apply env changes without rebuilding images:
+Apply env changes without rebuilding images (pass the same `-f` file list your deployment uses, e.g. `-f docker-compose.nas.yml -f docker-compose.gpu.yml`):
 
 ```bash
 docker compose up -d --no-deps backend worker
@@ -470,9 +483,13 @@ On `v*` tags, the chart is packaged and pushed to:
 
 Symptom: UI loads but API requests to localhost fail intermittently due to WSL2/IPv6 loopback forwarding.
 
-Fix backend port forward:
+Fix backend port forward — use the same `-f` file list your deployment runs with, or compose will silently switch the backend to the other stack's configuration:
 
 ```powershell
+# prebuilt-image deployment (recommended GPU path):
+docker compose -f docker-compose.nas.yml -f docker-compose.gpu.yml up -d --force-recreate --no-deps backend
+
+# local-build deployment:
 docker compose -f docker-compose.yml -f docker-compose.gpu.yml up -d --force-recreate --no-deps backend
 ```
 

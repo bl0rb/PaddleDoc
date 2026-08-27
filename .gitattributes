@@ -1,0 +1,7 @@
+# Shell scripts must stay LF: a default Git-for-Windows clone
+# (core.autocrlf=true) would otherwise check them out with CRLF, and
+# bash fails on 'set -euo pipefail\r' — breaking scripts/init-env.sh
+# for exactly the Windows users the README points at it, and
+# backend/entrypoint.sh inside the Linux images when built from such
+# a clone.
+*.sh text eol=lf
