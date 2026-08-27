@@ -117,6 +117,13 @@ worker:
   nodeSelector: {}
   tolerations: []
   affinity: {}
+  # RuntimeClass for the worker pod. Set to "nvidia" on clusters that expose
+  # the NVIDIA container runtime as a dedicated RuntimeClass (typical with the
+  # NVIDIA GPU Operator). Leave empty where GPU nodes already default to the
+  # NVIDIA runtime (e.g. EKS accelerated AMIs with the device plugin). Only
+  # relevant together with an nvidia.com/gpu resource limit -- see
+  # examples/gpu-worker-nvidia.yaml.
+  runtimeClassName: ""
   podSecurityContext:
     runAsNonRoot: true
     runAsUser: 1000

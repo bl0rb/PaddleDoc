@@ -1,0 +1,65 @@
+# GPU worker preset (NVIDIA). Runs the worker on GPU nodes with the
+# PaddleOCR-VL profile; backend/frontend stay on regular nodes untouched.
+#
+# Cluster prerequisites (not created by this chart):
+#   - GPU nodes with the NVIDIA device plugin (advertises nvidia.com/gpu),
+#     e.g. via the NVIDIA GPU Operator, or EKS accelerated AMIs.
+#   - The published ghcr.io/bl0rb/paddledoc-worker image is amd64 and already
+#     contains paddlepaddle-gpu — no custom image needed. The runtime
+#     auto-detects CUDA and falls back to CPU if the GPU is absent.
+#
+# Mirrors the settings of docker-compose.gpu.yml: VL default profile and
+# conservative single-slot Celery settings for CUDA stability.
+
+# Keep worker.replicaCount at 1 and autoscaling.worker disabled with this
+# preset: every additional replica demands a full nvidia.com/gpu (pods stay
+# Pending without one), and the HPA's CPU metric is a poor signal for a
+# GPU-bound solo worker.
+
+worker:
+  replicaCount: 1
+
+  # Set to "nvidia" ONLY where the NVIDIA runtime is a dedicated
+  # RuntimeClass (typical with the NVIDIA GPU Operator) -- with a wrong
+  # value the pod is rejected with "RuntimeClass not found". Leave empty
+  # where GPU nodes default to the NVIDIA runtime (e.g. EKS accelerated
+  # AMIs, GKE GPU node pools).
+  runtimeClassName: ""
+  # runtimeClassName: "nvidia"
+
+  paddleDefaultProfile: paddlevl_1_6_0_9b
+
+  resources:
+    requests:
+      cpu: "2"
+      memory: 8Gi
+    limits:
+      nvidia.com/gpu: 1
+      memory: 12Gi
+
+  # Adjust to your cluster's GPU node labels/taints. GPU nodes are commonly
+  # tainted with nvidia.com/gpu -- by the platform (GKE automatically; EKS
+  # node groups/Karpenter only if configured) or by the cluster admin; the
+  # Exists toleration is harmless where no taint is set.
+  tolerations:
+    - key: nvidia.com/gpu
+      operator: Exists
+      effect: NoSchedule
+
+  # CUDA-stability settings, same rationale as docker-compose.gpu.yml:
+  # one solo worker process, no prefetch, fresh process per task.
+  extraEnv:
+    - name: CELERY_WORKER_POOL
+      value: solo
+    - name: CELERY_WORKER_CONCURRENCY
+      value: "1"
+    - name: CELERY_PREFETCH_MULTIPLIER
+      value: "1"
+    - name: CELERY_MAX_TASKS_PER_CHILD
+      value: "1"
+
+  # VL model weights are large; give the model cache room (or use
+  # modelCache.persistence for restart-safe caching, see the chart README).
+  modelCache:
+    enabled: true
+    sizeLimit: 30Gi

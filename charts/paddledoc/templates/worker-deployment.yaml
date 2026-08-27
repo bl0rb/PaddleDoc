@@ -40,6 +40,9 @@ spec:
       {{- end }}
     spec:
       serviceAccountName: {{ include "paddledoc.serviceAccountName" . }}
+      {{- with .Values.worker.runtimeClassName }}
+      runtimeClassName: {{ . | quote }}
+      {{- end }}
       {{- with .Values.imagePullSecrets }}
       imagePullSecrets:
         {{- toYaml . | nindent 8 }}

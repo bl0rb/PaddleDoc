@@ -62,6 +62,40 @@ helm upgrade --install paddledoc ./charts/paddledoc \
   --set auth.secretKey.value=<openssl rand -hex 32>
 ```
 
+## GPU Worker Example (NVIDIA)
+
+Runs the worker on NVIDIA GPU nodes with the PaddleOCR-VL profile; backend and
+frontend stay on regular nodes. The published worker image (amd64) already
+contains `paddlepaddle-gpu` — no custom image is needed, and the runtime falls
+back to CPU when no GPU is present.
+
+```bash
+helm upgrade --install paddledoc ./charts/paddledoc \
+  --namespace paddledoc --create-namespace \
+  -f ./charts/paddledoc/examples/gpu-worker-nvidia.yaml \
+  --set auth.secretKey.value=<openssl rand -hex 32>
+```
+
+What the example sets ([examples/gpu-worker-nvidia.yaml](examples/gpu-worker-nvidia.yaml)):
+
+- `worker.resources.limits."nvidia.com/gpu": 1` — schedules onto a GPU node
+  (requires the NVIDIA device plugin / GPU Operator on the cluster)
+- `worker.runtimeClassName` — set to `nvidia` only where the NVIDIA runtime
+  is a dedicated RuntimeClass (typical with the GPU Operator); the example
+  leaves it empty, which is correct on clusters whose GPU nodes default to
+  the NVIDIA runtime (e.g. EKS accelerated AMIs, GKE GPU node pools)
+- `worker.paddleDefaultProfile: paddlevl_1_6_0_9b` plus solo-pool Celery
+  settings via `worker.extraEnv`, mirroring `docker-compose.gpu.yml`
+- a toleration for the common `nvidia.com/gpu` node taint — adjust
+  `nodeSelector`/`tolerations` to your cluster's GPU node labels
+- a 30Gi model cache (`worker.modelCache.sizeLimit`); consider
+  `worker.modelCache.persistence` so VL weights survive pod restarts
+
+Keep `worker.replicaCount: 1` and `autoscaling.worker` disabled with this
+preset: every additional replica demands a full `nvidia.com/gpu` (and stays
+`Pending` without one), and the HPA's CPU-utilization metric is a poor
+scaling signal for a GPU-bound solo worker.
+
 ## Important Notes
 
 1. If `persistence.enabled=true`, your StorageClass should support `ReadWriteMany` so backend and worker can access shared files. With `persistence.enabled=false`, backend and worker fall back to per-pod `emptyDir` volumes at the storage path (non-persistent, not shared between pods) so they keep working as non-root.
@@ -69,7 +103,7 @@ helm upgrade --install paddledoc ./charts/paddledoc \
 3. PostgreSQL must be external. Configure `database.*` and provide `database.passwordSecret`.
 4. Default mode runs Alembic in backend startup (`backend.runAlembicOnStartup=true`).
 5. For multi-replica backend setups, prefer `migrationJob.enabled=true` with `backend.runAlembicOnStartup=false`.
-6. OCR profile defaults to CPU-safe `ppocrv6_tiny`; switch to a GPU-oriented profile only when your cluster nodes provide NVIDIA runtime/device plugin.
+6. OCR profile defaults to CPU-safe `ppocrv6_tiny`; switch to a GPU-oriented profile only when your cluster nodes provide NVIDIA runtime/device plugin — see the [GPU Worker Example](#gpu-worker-example-nvidia) above.
 
 ## Running without shared storage
 
@@ -366,6 +400,7 @@ The following list contains all configurable parameters currently supported by t
 | `worker.nodeSelector` | map | `{}` |
 | `worker.tolerations` | list | `[]` |
 | `worker.affinity` | map | `{}` |
+| `worker.runtimeClassName` | string | `""` |
 | `worker.podSecurityContext` | map | `{runAsNonRoot: true, runAsUser: 1000, runAsGroup: 1000, fsGroup: 1000, fsGroupChangePolicy: OnRootMismatch, seccompProfile: {type: RuntimeDefault}}` |
 | `worker.containerSecurityContext` | map | `{allowPrivilegeEscalation: false, capabilities: {drop: [ALL]}}` |
 | `worker.modelCache.enabled` | bool | `true` |
@@ -522,6 +557,7 @@ worker:
   nodeSelector: {}
   tolerations: []
   affinity: {}
+  runtimeClassName: ""
   podSecurityContext:
     runAsNonRoot: true
     runAsUser: 1000
