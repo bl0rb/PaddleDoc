@@ -249,6 +249,14 @@ services:
     ports:
       - "3000:3000"
     environment:
+      # The URL the BROWSER calls, and the origin the CSP allows it to call
+      # (src/middleware.ts). Not the backend's PUBLIC_API_URL, which is the
+      # server-side URL for OIDC redirects -- the two only coincide when the
+      # browser and the OIDC provider reach the backend under the same name.
+      # Empty is fine and is the normal case: the frontend then derives
+      # `<page protocol>//<page hostname>:8000`. Set it only when backend and
+      # frontend do not share a host, and give it the SAME host as the page --
+      # mixing localhost and an IP makes SameSite=lax drop the session cookie.
       PADDLEDOC_PUBLIC_API_URL: ${PADDLEDOC_PUBLIC_API_URL:-}
     depends_on:
       - backend

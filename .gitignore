@@ -5,6 +5,10 @@ __pycache__/
 .pytest_cache/
 .mypy_cache/
 .env
+# Any .env variant (.env.local, .env.bak-*, ...) carries real secrets; only
+# the placeholder-filled example belongs in the repository.
+.env.*
+!.env.example
 venv/
 backend/.venv/
 test.db

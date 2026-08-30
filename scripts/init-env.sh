@@ -27,13 +27,43 @@ else
   : > "$ENV_FILE"
 fi
 
+EXAMPLE_FILE="$REPO_ROOT/.env.example"
+
+value_of() { sed -n "s/^$1=//p" "$2" | head -n 1; }
+
+replace_key() {
+  local key="$1" value="$2" tmp
+  tmp="$(mktemp)"
+  KEY="$key" VALUE="$value" awk '
+    BEGIN { k = ENVIRON["KEY"]; v = ENVIRON["VALUE"]; done = 0 }
+    !done && index($0, k "=") == 1 { print k "=" v; done = 1; next }
+    { print }
+  ' "$ENV_FILE" > "$tmp"
+  cat "$tmp" > "$ENV_FILE"
+  rm -f "$tmp"
+}
+
+# A .env copied from .env.example has every key present, so "is the key
+# there?" is the wrong question -- it kept SECRET_KEY and REDIS_PASSWORD at
+# values published in this repository while reporting success. A value still
+# identical to the one in .env.example is a published secret, not a choice,
+# so it counts as missing. Comparing against the file rather than a hardcoded
+# list keeps this correct when the examples change.
 ensure_key() {
-  local key="$1" value="$2"
-  if grep -qE "^${key}=" "$ENV_FILE"; then
-    echo "[init-env]   $key already set — kept"
-  else
+  local key="$1" value="$2" current example
+  if ! grep -qE "^${key}=" "$ENV_FILE"; then
     printf '%s=%s\n' "$key" "$value" >> "$ENV_FILE"
     echo "[init-env]   $key generated"
+    return
+  fi
+  current="$(value_of "$key" "$ENV_FILE")"
+  example=""
+  [ -f "$EXAMPLE_FILE" ] && example="$(value_of "$key" "$EXAMPLE_FILE")"
+  if [ -z "$current" ] || { [ -n "$example" ] && [ "$current" = "$example" ]; }; then
+    replace_key "$key" "$value"
+    echo "[init-env]   $key was empty or the .env.example placeholder — regenerated"
+  else
+    echo "[init-env]   $key already set — kept"
   fi
 }
 

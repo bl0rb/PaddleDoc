@@ -46,6 +46,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   *Upgrading an existing installation*.
 
 ### Fixed
+- The frontend no longer blocks its own API calls. `PADDLEDOC_PUBLIC_API_URL` is unset by
+  default in compose, and the CSP then left `connect-src` at `'self'` while the client still
+  called `<page hostname>:8000` — the browser refused every request before sending it, so a
+  fresh install could not even reach `/setup`. The CSP now derives the same fallback origin
+  from the request host, making the variable optional; Helm is unaffected (its chart always
+  sets `frontend.apiUrl`)
+- `scripts/init-env.sh` no longer keeps the placeholder secrets from `.env.example`. It only
+  checked whether a key was present, so a `.env` copied from the example kept the published
+  `SECRET_KEY` and `REDIS_PASSWORD` and the script still reported success. A value identical
+  to the one in `.env.example` now counts as missing and is regenerated
+- `.env.*` is gitignored (`.env.example` excepted): `.env.bak` and friends carry real secrets
 - Postgres and Redis no longer restart-loop on startup. Both official images enter their
   entrypoint as root, `chown`/`chmod` their data directory and only then drop to uid 999
   via `gosu`/`setpriv`; the blanket `cap_drop: ALL` added in the security audit removed

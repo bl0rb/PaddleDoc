@@ -81,7 +81,7 @@ POSTGRES_USER=paddledoc
 POSTGRES_PASSWORD=change-this
 POSTGRES_DB=paddledoc
 PADDLEDOC_TAG=latest
-PADDLEDOC_PUBLIC_API_URL=http://NAS_IP:8000
+PADDLEDOC_PUBLIC_API_URL=http://NAS_IP:8000    # optional — see below
 
 # Since v1.1.0 (authentication):
 SECRET_KEY=generate-with-openssl-rand-hex-32   # signs sessions, encrypts stored secrets — set once, never change
@@ -89,6 +89,22 @@ REDIS_PASSWORD=change-this-too
 PUBLIC_API_URL=http://NAS_IP:8000              # backend URL used for OIDC redirect URIs
 CORS_ORIGINS=["http://NAS_IP:3000"]            # your frontend origin(s); no wildcard — cookies are credentialed
 ```
+
+**The two API URLs are different variables and easy to mix up:**
+
+| Variable | Read by | Must be reachable by |
+|---|---|---|
+| `PUBLIC_API_URL` | backend, server-side | your OIDC provider (builds the redirect URI) |
+| `PADDLEDOC_PUBLIC_API_URL` | frontend, handed to the browser | the browser (and it goes into the CSP `connect-src`) |
+
+`PADDLEDOC_PUBLIC_API_URL` is optional. Left unset, the frontend derives
+`<page protocol>//<page hostname>:8000`, which is correct whenever backend and
+frontend share a host — the usual case. Set it only when a reverse proxy serves
+the API under a different name, and then give it the **same host as the page in
+the address bar**: mixing `localhost` and an IP makes the browser treat the
+session cookie as cross-site, `SameSite=lax` drops it, and login succeeds with
+200 while every following request returns 401. Every origin you open the UI
+under also has to be listed in `CORS_ORIGINS`.
 
 Endpoints:
 

@@ -34,7 +34,7 @@ function contentSecurityPolicy(apiOrigin: string | null): string {
 }
 
 /** Origin of PADDLEDOC_PUBLIC_API_URL, or null when it is unset/unparsable. */
-function apiOrigin(): string | null {
+function configuredApiOrigin(): string | null {
   const raw = process.env.PADDLEDOC_PUBLIC_API_URL?.trim();
   if (!raw) return null;
   try {
@@ -44,11 +44,41 @@ function apiOrigin(): string | null {
   }
 }
 
+/**
+ * Mirrors resolveApiBaseUrl()'s browser fallback in src/lib/api-base.ts: with
+ * PADDLEDOC_PUBLIC_API_URL unset the client calls `<protocol>//<hostname>:8000`
+ * derived from window.location. connect-src has to name that same origin or the
+ * browser blocks every API call before it leaves the page -- which is what
+ * docker-compose's empty default used to do. Keep the two in sync.
+ *
+ * new URL() doubles as validation here: a malformed Host header cannot inject
+ * anything into the policy, it just yields null and leaves connect-src at 'self'.
+ */
+function requestApiOrigin(request: NextRequest, isHttps: boolean): string | null {
+  const forwarded = request.headers.get('x-forwarded-host');
+  const host = (forwarded ? forwarded.split(',')[0] : request.headers.get('host'))?.trim();
+  if (!host) return null;
+  // window.location.hostname carries no port, and IPv6 literals keep their brackets.
+  const hostname = host.startsWith('[') ? host.slice(0, host.indexOf(']') + 1) : host.split(':')[0];
+  if (!hostname) return null;
+  try {
+    return new URL(`${isHttps ? 'https:' : 'http:'}//${hostname}:8000`).origin;
+  } catch {
+    return null;
+  }
+}
+
 export function middleware(request: NextRequest): NextResponse {
   const response = NextResponse.next();
   const headers = response.headers;
 
-  headers.set('Content-Security-Policy', contentSecurityPolicy(apiOrigin()));
+  const forwardedProto = request.headers.get('x-forwarded-proto');
+  const isHttps = forwardedProto
+    ? forwardedProto.split(',')[0].trim() === 'https'
+    : request.nextUrl.protocol === 'https:';
+
+  const apiOrigin = configuredApiOrigin() ?? requestApiOrigin(request, isHttps);
+  headers.set('Content-Security-Policy', contentSecurityPolicy(apiOrigin));
   headers.set('X-Frame-Options', 'DENY');
   headers.set('X-Content-Type-Options', 'nosniff');
   headers.set('Referrer-Policy', 'same-origin');
@@ -56,10 +86,6 @@ export function middleware(request: NextRequest): NextResponse {
 
   // HSTS only over TLS: behind a plain-HTTP reverse proxy or in local dev the
   // header would pin browsers to a scheme that is not being served.
-  const forwardedProto = request.headers.get('x-forwarded-proto');
-  const isHttps = forwardedProto
-    ? forwardedProto.split(',')[0].trim() === 'https'
-    : request.nextUrl.protocol === 'https:';
   if (isHttps) {
     headers.set('Strict-Transport-Security', 'max-age=31536000; includeSubDomains');
   }
