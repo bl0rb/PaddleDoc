@@ -1,43 +1,32 @@
-name: paddledoc
+# Contributor setup: builds every image from this checkout instead of pulling
+# the published ones, exposes Postgres and Redis on the host for psql/redis-cli
+# and lets Postgres trust local connections. That is a development posture, not
+# a deployment one -- end users want docker-compose.yml.
+#
+#   docker compose -f docker-compose.dev.yml up --build
+#
+# The project name differs from docker-compose.yml on purpose: both files
+# declare a `pgdata` volume, and sharing one between a trust-auth `postgres`
+# superuser and the password-protected `paddledoc` role of the standard stack
+# would hand whoever runs the dev file a shell on the real database.
+name: paddledoc_dev
 
 services:
-  postgres:
+  frontend:
     # No extra kernel privileges, no privilege escalation inside the
     # container -- mirrors the Helm chart containerSecurityContext.
     security_opt:
       - no-new-privileges:true
     cap_drop:
       - ALL
-    image: postgres:16
-    restart: always
-    container_name: paddledoc_postgres
+    build: ./frontend
+    restart: unless-stopped
+    ports:
+      - '3000:3000'
     environment:
-      POSTGRES_DB: ${POSTGRES_DB:-paddledoc}
-      POSTGRES_USER: ${POSTGRES_USER:-paddledoc}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required (run scripts/init-env.sh or set it in .env)}
-    volumes:
-      - ./nas-data/postgres:/var/lib/postgresql/data:rw
-    networks:
-      - paddledoc_netbridge
-
-  redis:
-    # No extra kernel privileges, no privilege escalation inside the
-    # container -- mirrors the Helm chart containerSecurityContext.
-    security_opt:
-      - no-new-privileges:true
-    cap_drop:
-      - ALL
-    image: redis:7
-    restart: always
-    container_name: paddledoc_redis
-    # requirepass keeps Redis (Celery broker + result backend) from sitting
-    # open on the compose network. Override REDIS_PASSWORD in a .env file for
-    # anything beyond NAS dev; backend/worker REDIS_URL below must match.
-    command: ["redis-server", "--save", "60", "1", "--loglevel", "warning", "--requirepass", "${REDIS_PASSWORD:?REDIS_PASSWORD is required (run scripts/init-env.sh or set it in .env)}"]
-    volumes:
-      - ./nas-data/redis:/data:rw
-    networks:
-      - paddledoc_netbridge
+      PADDLEDOC_PUBLIC_API_URL: http://localhost:8000
+    depends_on:
+      - backend
 
   backend:
     # No extra kernel privileges, no privilege escalation inside the
@@ -46,27 +35,20 @@ services:
       - no-new-privileges:true
     cap_drop:
       - ALL
-    image: ghcr.io/bl0rb/paddledoc-backend:${PADDLEDOC_TAG:-latest}
-    restart: always
-    container_name: paddledoc_backend
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    restart: unless-stopped
     ports:
-      - "8000:8000"
+      - '8000:8000'
     environment:
-      POSTGRES_HOST: postgres
-      POSTGRES_PORT: ${POSTGRES_PORT:-5432}
-      POSTGRES_DB: ${POSTGRES_DB:-paddledoc}
-      POSTGRES_USER: ${POSTGRES_USER:-paddledoc}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required (run scripts/init-env.sh or set it in .env)}
+      DATABASE_URL: postgresql+psycopg://postgres@postgres:5432/paddledoc
       REDIS_URL: redis://:${REDIS_PASSWORD:?REDIS_PASSWORD is required (run scripts/init-env.sh or set it in .env)}@redis:6379/0
-      # Concrete origin, not "*": the app sends credentialed CORS responses
-      # (session cookies), so a wildcard would reflect any origin back with
-      # Access-Control-Allow-Credentials. Set CORS_ORIGINS to your NAS
-      # frontend URL(s), e.g. '["https://paddledoc.example.lan"]'.
-      CORS_ORIGINS: ${CORS_ORIGINS:-["http://localhost:3000"]}
+      CORS_ORIGINS: '["http://localhost:3000"]'
       # Signs session cookies + the OIDC state cookie, and derives the key
       # OIDC provider client secrets are encrypted with. The app itself
       # refuses to start without one against this postgres-backed compose
-      # setup -- override in a .env file for anything beyond local/NAS dev.
+      # setup -- override in a .env file for anything beyond local dev.
       SECRET_KEY: ${SECRET_KEY:?SECRET_KEY is required (run scripts/init-env.sh or set it in .env) — it encrypts every stored OIDC/import/VL credential}
       # Base URL the backend is reachable at; used to build the OIDC
       # redirect_uri (`{PUBLIC_API_URL}/api/v1/auth/oidc/{slug}/callback`).
@@ -79,30 +61,26 @@ services:
       # '["vl.internal:8000"]' -- JSON list string, same convention as
       # IMPORT_PRIVATE_HOST_ALLOWLIST.
       VL_PRIVATE_HOST_ALLOWLIST: ${VL_PRIVATE_HOST_ALLOWLIST:-[]}
-      # Confluence import. A NAS-hosted internal Confluence is the textbook
-      # allowlist use case: put its hostname (host or host:port) in
-      # IMPORT_PRIVATE_HOST_ALLOWLIST, e.g. '["wiki.local:8090"]' -- JSON
-      # list string, same convention as CORS_ORIGINS. Cloud
-      # (*.atlassian.net) needs no allowlist entry.
+      # Confluence import. The allowlist holds hostnames (host or host:port)
+      # of private-network Confluence servers imports may reach -- e.g. an
+      # internal wiki on this NAS/LAN; JSON list string, same convention as
+      # CORS_ORIGINS. Cloud (*.atlassian.net) needs no allowlist entry.
       IMPORT_ENABLED: ${IMPORT_ENABLED:-true}
       IMPORT_PRIVATE_HOST_ALLOWLIST: ${IMPORT_PRIVATE_HOST_ALLOWLIST:-[]}
       IMPORT_MAX_PAGES: ${IMPORT_MAX_PAGES:-200}
       IMPORT_ATTACHMENT_MAX_BYTES: ${IMPORT_ATTACHMENT_MAX_BYTES:-20971520}
-      # OpenWebUI push. A NAS-/LAN-hosted OpenWebUI is the textbook allowlist
-      # use case: put its host (host or host:port) in
-      # OPENWEBUI_PRIVATE_HOST_ALLOWLIST, e.g. '["192.168.1.10:3000"]' --
-      # JSON list string, same convention as IMPORT_PRIVATE_HOST_ALLOWLIST.
+      # OpenWebUI push: same allowlist convention as IMPORT_* -- a LAN-hosted
+      # OpenWebUI needs its host (host or host:port) listed here.
       OPENWEBUI_ENABLED: ${OPENWEBUI_ENABLED:-true}
       OPENWEBUI_PRIVATE_HOST_ALLOWLIST: ${OPENWEBUI_PRIVATE_HOST_ALLOWLIST:-[]}
-      # Webhook delivery. A NAS-/LAN-hosted target (e.g. n8n) is the
-      # textbook allowlist use case: put its host (host or host:port) in
-      # WEBHOOK_PRIVATE_HOST_ALLOWLIST, e.g. '["192.168.1.10:5678"]' --
-      # JSON list string, same convention as IMPORT_PRIVATE_HOST_ALLOWLIST.
+      # Webhook delivery: same allowlist convention as IMPORT_*/OPENWEBUI_* --
+      # a LAN-hosted target (e.g. n8n) needs its host (host or host:port)
+      # listed here.
       WEBHOOKS_ENABLED: ${WEBHOOKS_ENABLED:-true}
       WEBHOOK_PRIVATE_HOST_ALLOWLIST: ${WEBHOOK_PRIVATE_HOST_ALLOWLIST:-[]}
       WEBHOOK_MAX_PENDING_DELIVERIES_PER_USER: ${WEBHOOK_MAX_PENDING_DELIVERIES_PER_USER:-50}
     volumes:
-      - ./nas-data/storage:/app/backend/storage:rw
+      - ./backend/storage:/app/backend/storage
     depends_on:
       - postgres
       - redis
@@ -115,8 +93,6 @@ services:
       timeout: 5s
       retries: 36
       start_period: 10s
-    networks:
-      - paddledoc_netbridge
 
   worker:
     # No extra kernel privileges, no privilege escalation inside the
@@ -125,27 +101,30 @@ services:
       - no-new-privileges:true
     cap_drop:
       - ALL
-    image: ghcr.io/bl0rb/paddledoc-worker:${PADDLEDOC_TAG:-latest}
-    restart: always
-    container_name: paddledoc_worker
+    build:
+      context: ./backend
+      dockerfile: worker.Dockerfile
+    restart: unless-stopped
     mem_limit: ${WORKER_MEMORY_LIMIT:-3g}
     cpus: ${WORKER_CPUS:-2.0}
     environment:
-      POSTGRES_HOST: postgres
-      POSTGRES_PORT: ${POSTGRES_PORT:-5432}
-      POSTGRES_DB: ${POSTGRES_DB:-paddledoc}
-      POSTGRES_USER: ${POSTGRES_USER:-paddledoc}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required (run scripts/init-env.sh or set it in .env)}
+      DATABASE_URL: postgresql+psycopg://postgres@postgres:5432/paddledoc
       REDIS_URL: redis://:${REDIS_PASSWORD:?REDIS_PASSWORD is required (run scripts/init-env.sh or set it in .env)}@redis:6379/0
       # The worker imports app/core/config.py (directly, and via
       # alembic/env.py if it ever runs migrations) same as the backend, which
       # fails fast at import time if SECRET_KEY is unset for a non-sqlite
       # database -- set here for parity, same default as the backend's.
       SECRET_KEY: ${SECRET_KEY:?SECRET_KEY is required (run scripts/init-env.sh or set it in .env) — it encrypts every stored OIDC/import/VL credential}
-      PADDLE_DEFAULT_PROFILE: ${PADDLE_DEFAULT_PROFILE:-ppocrv6_tiny}
+      PADDLE_DEFAULT_PROFILE: ppocrv6_tiny
+      # Runtime tuning for smaller ARM hosts to reduce model load spikes.
       CELERY_WORKER_CONCURRENCY: ${CELERY_WORKER_CONCURRENCY:-1}
       CELERY_PREFETCH_MULTIPLIER: ${CELERY_PREFETCH_MULTIPLIER:-1}
       CELERY_MAX_TASKS_PER_CHILD: ${CELERY_MAX_TASKS_PER_CHILD:-5}
+      # Celery task hard/soft time limits + matching broker visibility_timeout;
+      # see app/core/config.py / app/workers/celery_app.py.
+      CELERY_TASK_SOFT_TIME_LIMIT_SECONDS: ${CELERY_TASK_SOFT_TIME_LIMIT_SECONDS:-1500}
+      CELERY_TASK_TIME_LIMIT_SECONDS: ${CELERY_TASK_TIME_LIMIT_SECONDS:-1800}
+      CELERY_BROKER_VISIBILITY_TIMEOUT_SECONDS: ${CELERY_BROKER_VISIBILITY_TIMEOUT_SECONDS:-1800}
       OMP_NUM_THREADS: ${OMP_NUM_THREADS:-1}
       ONNXRUNTIME_INTRA_OP_NUM_THREADS: ${ONNXRUNTIME_INTRA_OP_NUM_THREADS:-1}
       ONNXRUNTIME_INTER_OP_NUM_THREADS: ${ONNXRUNTIME_INTER_OP_NUM_THREADS:-1}
@@ -187,38 +166,73 @@ services:
       WEBHOOK_PRIVATE_HOST_ALLOWLIST: ${WEBHOOK_PRIVATE_HOST_ALLOWLIST:-[]}
       WEBHOOK_MAX_PENDING_DELIVERIES_PER_USER: ${WEBHOOK_MAX_PENDING_DELIVERIES_PER_USER:-50}
     volumes:
-      - ./nas-data/storage:/app/backend/storage:rw
-      # See docker-compose.yml: container home is /home/paddledoc.
-      # The host directory must belong to UID/GID 1000 -- on an existing
-      # installation run: sudo chown -R 1000:1000 ./nas-data
-      - ./nas-data/paddlex_models:/home/paddledoc:rw
+      - ./backend/storage:/app/backend/storage
+      # PaddleOCR writes model weights into $HOME/.paddlex and
+      # $HOME/.paddleocr; the container home is /home/paddledoc since the
+      # image stopped running as root (same layout as the Helm chart).
+      - paddlex_models:/home/paddledoc
     depends_on:
       backend:
         condition: service_healthy
       redis:
         condition: service_started
-    networks:
-      - paddledoc_netbridge
 
-  frontend:
-    # No extra kernel privileges, no privilege escalation inside the
-    # container -- mirrors the Helm chart containerSecurityContext.
+  postgres:
+    # No privilege escalation, and every capability dropped except the five
+    # the official entrypoint genuinely needs: it starts as root, chowns and
+    # chmods the data dir, then drops to uid 999 via gosu. A bare
+    # `cap_drop: ALL` makes all three fail with EPERM and the entrypoint
+    # aborts. The Helm chart's containerSecurityContext can drop ALL and add
+    # nothing back because it pairs that with `runAsUser: 999`, so its
+    # container never enters the entrypoint's root branch at all -- keep
+    # these in sync with docker-compose.yml, which needs the caps to stay
+    # portable across named volumes and NAS bind mounts alike.
     security_opt:
       - no-new-privileges:true
     cap_drop:
       - ALL
-    image: ghcr.io/bl0rb/paddledoc-frontend:${PADDLEDOC_TAG:-latest}
-    restart: always
-    container_name: paddledoc_frontend
-    ports:
-      - "3000:3000"
+    cap_add:
+      - CHOWN
+      - DAC_OVERRIDE
+      - FOWNER
+      - SETGID
+      - SETUID
+    image: postgres:16
+    restart: unless-stopped
     environment:
-      PADDLEDOC_PUBLIC_API_URL: ${PADDLEDOC_PUBLIC_API_URL:-}
-    depends_on:
-      - backend
-    networks:
-      - paddledoc_netbridge
+      POSTGRES_DB: paddledoc
+      POSTGRES_USER: postgres
+      POSTGRES_HOST_AUTH_METHOD: trust
+    ports:
+      - '5432:5432'
+    volumes:
+      - pgdata:/var/lib/postgresql/data
 
-networks:
-  paddledoc_netbridge:
-    driver: bridge
+  redis:
+    # Same five capabilities as postgres above, for the same reason: the
+    # entrypoint chowns /data and drops to uid 999 via setpriv, both of which
+    # the Helm chart avoids needing by setting `runAsUser: 999` instead.
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+      - DAC_OVERRIDE
+      - FOWNER
+      - SETGID
+      - SETUID
+    image: redis:7
+    restart: unless-stopped
+    # Redis is the Celery broker/result backend and reachable from every
+    # backend/worker container -- requirepass keeps it from sitting open on
+    # the compose network. Override REDIS_PASSWORD in a .env file for
+    # anything beyond local dev; backend/worker REDIS_URL above must use the
+    # same value.
+    command: ['redis-server', '--requirepass', '${REDIS_PASSWORD:?REDIS_PASSWORD is required (run scripts/init-env.sh or set it in .env)}']
+    ports:
+      - '6379:6379'
+
+volumes:
+  pgdata:
+  paddlex_models:

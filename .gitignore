@@ -14,6 +14,11 @@ backend/test.db
 backend/backend/
 backend/storage/uploads/*
 backend/storage/results/*
+# Data directory of the pre-named-volume layout. Nothing creates it any more,
+# but every installation that predates the switch still has one sitting in the
+# checkout -- and it holds the Postgres cluster, so a stray `git add .` would
+# publish accounts, documents and the credentials encrypted under SECRET_KEY.
+nas-data/
 frontend/node_modules/
 frontend/.next/
 .DS_Store

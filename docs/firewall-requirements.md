@@ -100,14 +100,16 @@ Cloud-metadata addresses stay blocked unconditionally and cannot be allowlisted.
   (`ghcr.io` + `pkg-containers.githubusercontent.com`, 443) — usually covered
   by cluster-level infrastructure rules.
 
-**Docker Compose (NAS: `docker-compose.nas.yml`)**
+**Docker Compose (standard: `docker-compose.yml`)**
 
 - Published host ports: `3000` (frontend) and `8000` (backend) only. PostgreSQL
   and Redis stay on the internal compose network and must not be exposed.
-- The worker persists models in `./nas-data/paddlex_models`, so model-host
-  egress is only needed until the cache is populated.
+- The worker persists models in the `paddledoc_paddlex_models` volume, so
+  model-host egress is only needed until the cache is populated. The
+  `docker-compose.nas.example.yml` overlay only moves that volume to a host
+  path; it changes no ports and no egress.
 
-**Docker Compose (development: `docker-compose.yml`)**
+**Docker Compose (development: `docker-compose.dev.yml`)**
 
 - Additionally publishes `5432` and `6379` to the host for local development
   convenience. Do not use this file on a reachable network without firewalling

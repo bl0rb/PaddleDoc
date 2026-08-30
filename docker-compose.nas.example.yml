@@ -1,0 +1,51 @@
+# Example: keep PaddleDoc's data on a host path instead of in Docker-managed
+# volumes -- a NAS share (UGREEN, QNAP, Synology), a dedicated disk, anything
+# your backup already covers. This is an overlay, not a standalone file:
+#
+#   docker compose -f docker-compose.yml -f docker-compose.nas.example.yml up -d
+#
+# It is an EXAMPLE. The paths below are Synology-style; copy the file, point
+# it at your own share, and pass your copy instead. Nothing else about the
+# deployment changes -- images, ports and settings all still come from
+# docker-compose.yml.
+#
+# Create the directories and give them to the UIDs the containers run as
+# (Postgres and Redis are uid 999, backend and worker uid 1000). On the NAS,
+# once, over SSH:
+#
+#   sudo mkdir -p /volume1/paddledoc/{postgres,redis,storage,models}
+#   sudo chown -R 999:999   /volume1/paddledoc/postgres /volume1/paddledoc/redis
+#   sudo chown -R 1000:1000 /volume1/paddledoc/storage  /volume1/paddledoc/models
+#
+# Use this on Linux hosts and NAS boxes only. On Docker Desktop (Windows and
+# macOS) a bind mount cannot be chmod'ed to 0700, which Postgres insists on
+# for PGDATA, so `initdb` fails -- stay on the named volumes of
+# docker-compose.yml there, they need no host directory at all.
+#
+# Migrating an existing named-volume install onto a share? Stop the stack,
+# copy each volume across, then start with this overlay:
+#
+#   docker compose down
+#   docker run --rm -v paddledoc_pgdata:/from -v /volume1/paddledoc/postgres:/to \
+#     alpine sh -c 'cp -a /from/. /to/'
+#   # ... same for paddledoc_redisdata, paddledoc_storage, paddledoc_paddlex_models
+
+services:
+  postgres:
+    volumes:
+      - /volume1/paddledoc/postgres:/var/lib/postgresql/data:rw
+
+  redis:
+    volumes:
+      - /volume1/paddledoc/redis:/data:rw
+
+  backend:
+    volumes:
+      - /volume1/paddledoc/storage:/app/backend/storage:rw
+
+  worker:
+    volumes:
+      # Must be the same share the backend mounts -- the worker writes the
+      # files the backend serves.
+      - /volume1/paddledoc/storage:/app/backend/storage:rw
+      - /volume1/paddledoc/models:/home/paddledoc:rw

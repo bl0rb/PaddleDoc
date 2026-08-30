@@ -86,10 +86,16 @@ jobs:
       - name: Generate throwaway secrets
         run: ./scripts/init-env.sh
 
+      # Every combination a user can actually run, overlays included -- an
+      # overlay that no longer matches a service name in the base file is a
+      # silent no-op, not an error, so it has to be checked as a pair.
       - name: Validate docker-compose files
         run: |
           docker compose -f docker-compose.yml config -q
-          docker compose -f docker-compose.nas.yml config -q
+          docker compose -f docker-compose.dev.yml config -q
+          docker compose -f docker-compose.yml -f docker-compose.gpu.yml config -q
+          docker compose -f docker-compose.dev.yml -f docker-compose.gpu.yml config -q
+          docker compose -f docker-compose.yml -f docker-compose.nas.example.yml config -q
 
       - name: Build backend image
         run: docker build -f backend/Dockerfile -t paddledoc-backend:ci backend

@@ -28,7 +28,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   children-listing failures with context, and cap events, all visible in the admin Logs tab
   and the run's error list. Personal spaces (`~` keys) get an explicit hint
 
+### Changed
+- **Breaking (compose file names).** One standard deployment for every platform:
+  `docker-compose.nas.yml` became `docker-compose.yml`, so Windows, macOS, Linux and NAS
+  hosts all start with a plain `docker compose up -d`. The old name described the file's
+  origin, not its audience — it was always the deployment everyone should use. The
+  local-build file that held the `docker-compose.yml` name is now `docker-compose.dev.yml`
+  and runs under its own compose project name, so a contributor's trust-auth Postgres can
+  no longer end up sharing a volume with a real installation.
+- **Breaking (data location).** The standard file keeps Postgres, Redis, document storage
+  and the PaddleOCR model cache in Docker-managed volumes instead of bind-mounting
+  `./nas-data/`. That directory only ever existed on Windows and macOS because a compose
+  file demanded it, and it forced a `chown -R 1000:1000` on Linux hosts. Named volumes
+  need neither. To keep data on a specific share or disk, the new
+  `docker-compose.nas.example.yml` overlay redirects all four volumes to host paths and
+  changes nothing else. Migration steps for existing installations are in the README under
+  *Upgrading an existing installation*.
+
 ### Fixed
+- Postgres and Redis no longer restart-loop on startup. Both official images enter their
+  entrypoint as root, `chown`/`chmod` their data directory and only then drop to uid 999
+  via `gosu`/`setpriv`; the blanket `cap_drop: ALL` added in the security audit removed
+  `CHOWN`, `DAC_OVERRIDE`, `FOWNER`, `SETGID` and `SETUID`, so all of that failed with
+  `EPERM` (`chown: changing ownership of '.': Operation not permitted`), the entrypoint
+  aborted and `restart: always` looped it — taking the backend (unhealthy) and worker
+  (never started) down with it. Both services now add back exactly those five capabilities,
+  keeping the other nine of Docker's defaults dropped. The Helm chart is unaffected: it
+  pairs `capabilities.drop: [ALL]` with `runAsUser: 999`, so its containers never enter
+  the entrypoint's root branch at all
 - Pasted Confluence Server/Data-Center page links now work as import scope:
   `/display/SPACE/Page+Title` URLs (umlauts, personal spaces included) are resolved to the
   page id at creation time via the source's API, with a clear message when resolution fails —

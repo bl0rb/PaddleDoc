@@ -8,9 +8,9 @@
 [![FastAPI](https://img.shields.io/badge/FastAPI-0.141-009688?logo=fastapi&logoColor=white&style=flat-square)](backend/requirements.in)
 [![Celery](https://img.shields.io/badge/Celery-5.6-37814A?logo=celery&logoColor=white&style=flat-square)](backend/worker.Dockerfile)
 [![Next.js](https://img.shields.io/badge/Next.js-16-000000?logo=nextdotjs&logoColor=white&style=flat-square)](frontend/package.json)
-[![PostgreSQL](https://img.shields.io/badge/PostgreSQL-16-4169E1?logo=postgresql&logoColor=white&style=flat-square)](docker-compose.nas.yml)
-[![Redis](https://img.shields.io/badge/Redis-7-FF4438?logo=redis&logoColor=white&style=flat-square)](docker-compose.nas.yml)
-[![Docker](https://img.shields.io/badge/Docker-compose%20%C2%B7%20NAS-2496ED?logo=docker&logoColor=white&style=flat-square)](docker-compose.nas.yml)
+[![PostgreSQL](https://img.shields.io/badge/PostgreSQL-16-4169E1?logo=postgresql&logoColor=white&style=flat-square)](docker-compose.yml)
+[![Redis](https://img.shields.io/badge/Redis-7-FF4438?logo=redis&logoColor=white&style=flat-square)](docker-compose.yml)
+[![Docker](https://img.shields.io/badge/Docker-compose-2496ED?logo=docker&logoColor=white&style=flat-square)](docker-compose.yml)
 [![Kubernetes](https://img.shields.io/badge/Kubernetes-Helm%20chart-326CE5?logo=kubernetes&logoColor=white&style=flat-square)](charts/paddledoc)
 
 [![pip-audit](https://img.shields.io/badge/pip--audit-0%20findings-216B52?logo=python&logoColor=white&style=flat-square)](.github/workflows/pr-ci.yml)
@@ -50,14 +50,18 @@ Choose your deployment mode:
 
 | Mode | Best for | Command |
 |---|---|---|
-| Standalone Docker | Local server or NAS (UGREEN/QNAP/Synology) | `./scripts/init-env.sh && docker compose -f docker-compose.nas.yml up -d` |
-| Docker (Dev/Single Host) | Local development with local builds | `./scripts/init-env.sh && docker compose up --build` |
-| Docker + NVIDIA GPU | Windows Docker Desktop with GPU-enabled worker profile | `wsl bash scripts/init-env.sh; docker compose -f docker-compose.nas.yml -f docker-compose.gpu.yml up -d` |
+| Standalone Docker | Everyone — Windows, macOS, Linux, NAS | `./scripts/init-env.sh && docker compose up -d` |
+| Docker (Dev/Single Host) | Contributors building the images from source | `./scripts/init-env.sh && docker compose -f docker-compose.dev.yml up --build` |
+| Docker + NVIDIA GPU | Windows Docker Desktop with GPU-enabled worker profile | `wsl bash scripts/init-env.sh; docker compose -f docker-compose.yml -f docker-compose.gpu.yml up -d` |
 | Kubernetes (Helm) | k3s/k8s clusters and scale-out deployments | `helm upgrade --install paddledoc ./charts/paddledoc -n paddledoc --create-namespace --set auth.secretKey.value=$(openssl rand -hex 32)` |
 
-### Standalone NAS (No Kubernetes)
+### Standard Deployment (No Kubernetes)
 
-Use prebuilt GHCR images and persistent local folders.
+One file, every platform: `docker-compose.yml` pulls the prebuilt GHCR images and
+keeps all data in Docker-managed volumes, so the same `docker compose up -d` works
+on Windows, macOS, Linux and a NAS — no directory to create, no ownership to fix.
+To place the data on a specific share or disk instead, see
+[Storing data on a NAS share](#storing-data-on-a-nas-share) below.
 
 ```bash
 # Generates SECRET_KEY, POSTGRES_PASSWORD and REDIS_PASSWORD into .env.
@@ -67,7 +71,7 @@ Use prebuilt GHCR images and persistent local folders.
 # is encrypted under. Compose refuses to start until they are set.
 ./scripts/init-env.sh
 
-docker compose -f docker-compose.nas.yml up -d
+docker compose up -d
 ```
 
 Further environment values go into the same `.env` next to the compose file — see `.env.example`:
@@ -93,10 +97,34 @@ Endpoints:
 
 First run: open `http://NAS_IP:3000/setup` and create the initial admin account. Everything else requires a login from then on. Database migrations run automatically on backend startup.
 
-### Docker (Local Build)
+### Storing data on a NAS share
+
+The named volumes of the standard file live wherever Docker keeps its data and are
+the right default everywhere. When the data has to sit on a particular share —
+because that is what your backup covers, or because the volume needs to be on a
+larger disk — overlay `docker-compose.nas.example.yml`, which redirects the four
+volumes to host paths and changes nothing else:
 
 ```bash
-docker compose up --build
+# copy it, point it at your own share, then:
+docker compose -f docker-compose.yml -f docker-compose.nas.example.yml up -d
+```
+
+The directories must exist and belong to the container UIDs (999 for Postgres and
+Redis, 1000 for backend and worker) — the file spells the commands out. Linux hosts
+and NAS boxes only: on Docker Desktop a bind mount cannot be `chmod`ed to `0700`,
+which Postgres requires for `PGDATA`, so `initdb` fails there. Windows and macOS
+should stay on the named volumes.
+
+### Docker (Local Build)
+
+For contributors changing backend, worker or frontend code — builds every image from
+this checkout and publishes Postgres and Redis on the host. It runs under its own
+compose project name, so it never touches the volumes of a standard install on the
+same machine.
+
+```bash
+docker compose -f docker-compose.dev.yml up --build
 ```
 
 Endpoints:
@@ -313,19 +341,33 @@ n8n URL choice:
 
 ### Upgrading an existing installation
 
-Two changes in this release need a one-time step on hosts that were set up earlier:
+Three changes in this release need a one-time step on hosts that were set up earlier:
 
-1. **The containers no longer run as root** (UID/GID 1000 now, matching what the Helm chart already enforced). Bind-mounted directories still belong to root, so hand them over before starting:
+1. **`docker-compose.nas.yml` is now just `docker-compose.yml`, and its data lives in named volumes.** The old name suggested the file was NAS-specific when it was in fact the deployment everyone should use, and its `./nas-data/` directory was a folder Windows and macOS hosts only ever created because a compose file demanded it. The standard file now uses Docker-managed volumes; the local-build file that previously held the `docker-compose.yml` name moved to `docker-compose.dev.yml`.
+
+   Copy your existing data across once, then start the renamed stack:
 
    ```bash
-   docker compose -f docker-compose.nas.yml down
-   sudo chown -R 1000:1000 ./nas-data
-   docker compose -f docker-compose.nas.yml up -d
+   docker compose -f docker-compose.nas.yml down     # still the old file name
+   for v in postgres:pgdata redis:redisdata storage:storage paddlex_models:paddlex_models; do
+     docker run --rm -v "$PWD/nas-data/${v%%:*}:/from" -v "paddledoc_${v##*:}:/to" \
+       alpine sh -c 'cp -a /from/. /to/ 2>/dev/null || true'
+   done
+   docker compose up -d                              # new file name, no -f needed
    ```
 
-   The PaddleOCR model cache moved from `/root/.paddlex` to `/home/paddledoc` inside the container; the updated compose file mounts the new path already. Kubernetes deployments are unaffected — the chart set `runAsUser: 1000` all along.
+   Verify the app comes up, then `rm -rf ./nas-data`. To keep the data on a host path instead of migrating it, use the `docker-compose.nas.example.yml` overlay — see [Storing data on a NAS share](#storing-data-on-a-nas-share).
 
-2. **The compose files no longer carry fallback secrets.** If you never overrode `SECRET_KEY`, `POSTGRES_PASSWORD` or `REDIS_PASSWORD`, the stack was running with the values from this repository. Compose now refuses to start without them:
+2. **The containers no longer run as root** (UID/GID 1000 now, matching what the Helm chart already enforced). Named volumes need nothing from you — Docker seeds them from the image with the right ownership. Only if you bind-mount host directories via the NAS overlay do they have to be handed over:
+
+   ```bash
+   sudo chown -R 999:999   /your/share/postgres /your/share/redis
+   sudo chown -R 1000:1000 /your/share/storage  /your/share/models
+   ```
+
+   The PaddleOCR model cache moved from `/root/.paddlex` to `/home/paddledoc` inside the container; the compose files mount the new path already. Kubernetes deployments are unaffected — the chart set `runAsUser: 1000` all along.
+
+3. **The compose files no longer carry fallback secrets.** If you never overrode `SECRET_KEY`, `POSTGRES_PASSWORD` or `REDIS_PASSWORD`, the stack was running with the values from this repository. Compose now refuses to start without them:
 
    ```bash
    ./scripts/init-env.sh   # fills in only the keys that are missing
@@ -359,7 +401,7 @@ Recommended: prebuilt GHCR images plus the GPU override — no local build. The 
 # or from Git Bash without the wsl prefix)
 wsl bash scripts/init-env.sh
 
-docker compose -f docker-compose.nas.yml -f docker-compose.gpu.yml up -d
+docker compose -f docker-compose.yml -f docker-compose.gpu.yml up -d
 ```
 
 The defaults target a desktop setup (`http://localhost:3000` / `http://localhost:8000`), so no further URL configuration is needed. Prerequisite: a current NVIDIA driver on the Windows host — Docker Desktop's WSL2 integration handles the CUDA passthrough itself.
@@ -368,7 +410,7 @@ Building the images locally instead (only needed when you changed backend/worker
 
 ```powershell
 wsl bash scripts/init-env.sh
-docker compose -f docker-compose.yml -f docker-compose.gpu.yml up -d --build
+docker compose -f docker-compose.dev.yml -f docker-compose.gpu.yml up -d --build
 ```
 
 Behavior summary:
@@ -380,10 +422,10 @@ Behavior summary:
 
 ### Worker Scaling and Tuning
 
-Scale workers (local-build dev compose only — `docker-compose.nas.yml` pins `container_name: paddledoc_worker`, which cannot be scaled, and the GPU overlay's solo-pool settings assume a single worker):
+Scale workers (local-build dev compose only — `docker-compose.yml` pins `container_name: paddledoc_worker`, which cannot be scaled, and the GPU overlay's solo-pool settings assume a single worker):
 
 ```bash
-docker compose up --build -d --scale worker=2
+docker compose -f docker-compose.dev.yml up --build -d --scale worker=2
 ```
 
 Memory-constrained baseline:
@@ -416,7 +458,7 @@ OPENAI_API_BASE_URL=http://host.docker.internal:11434
 OPENAI_API_BEARER_TOKEN=ollama
 ```
 
-Apply env changes without rebuilding images (pass the same `-f` file list your deployment uses, e.g. `-f docker-compose.nas.yml -f docker-compose.gpu.yml`):
+Apply env changes without rebuilding images (pass the same `-f` file list your deployment uses, e.g. `-f docker-compose.yml -f docker-compose.gpu.yml`):
 
 ```bash
 docker compose up -d --no-deps backend worker
@@ -487,10 +529,10 @@ Fix backend port forward — use the same `-f` file list your deployment runs wi
 
 ```powershell
 # prebuilt-image deployment (recommended GPU path):
-docker compose -f docker-compose.nas.yml -f docker-compose.gpu.yml up -d --force-recreate --no-deps backend
+docker compose -f docker-compose.yml -f docker-compose.gpu.yml up -d --force-recreate --no-deps backend
 
 # local-build deployment:
-docker compose -f docker-compose.yml -f docker-compose.gpu.yml up -d --force-recreate --no-deps backend
+docker compose -f docker-compose.dev.yml -f docker-compose.gpu.yml up -d --force-recreate --no-deps backend
 ```
 
 IPv4 health check:
