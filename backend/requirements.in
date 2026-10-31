@@ -21,7 +21,7 @@ redis==6.2.0
 python-multipart==0.0.31
 pytest==9.1.1
 httpx==0.28.1
-pypdf==6.16.1
+pypdf==6.21.4
 xlrd==2.0.2
 bcrypt==5.0.0
 cryptography==50.0.0
