@@ -26,7 +26,7 @@ xlrd==2.0.2
 bcrypt==5.0.0
 cryptography==50.0.0
 authlib==1.7.2
-joserfc==1.7.4
+joserfc==1.7.6
 email-validator==2.3.0
 markdownify==1.2.0
 beautifulsoup4==4.14.2
